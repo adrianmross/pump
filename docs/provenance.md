@@ -9,7 +9,8 @@ Pump's provenance model has two jobs:
 
 `inflate --provenance-out` writes machine-readable generated-field provenance.
 Each entry records the document index, JSON Pointer path, rule name, operation,
-reason, and operation-level rule location when the rule file can be indexed.
+reason, operation-level rule location, and best-effort value-level rule
+location when the rule file can be indexed.
 
 `explain` inflates the input, prints the final value for the requested path, and
 reports whether the value came from input or a rule. By default it prints only
@@ -41,18 +42,20 @@ over `serde_yml::loader::Loader`. Its parsed document events carry marks with
 byte index, line, and column. That avoids adding a second YAML parser only for
 spans.
 
-The first implemented slice attaches operation-level locations:
+Pump records operation-level locations:
 
 - `/rules/0/defaults`
 - `/rules/0/overrides`
 - `/rules/0/delete`
 - `/rules/0/replace`
 
-Leaf-level value locations are not implemented yet. They should be added as a
-second layer and treated as best-effort detail. They require carrying each
-relative value path from a rule operation through `record_generated_paths`.
+Pump also records best-effort value-level locations below those operations:
 
-The intended shape is:
+- `/rules/0/defaults/resources/requests/cpu`
+- `/rules/0/overrides/mode`
+- `/rules/0/replace/enabled`
+
+The output shape is:
 
 ```json
 {
@@ -72,8 +75,10 @@ The intended shape is:
 ```
 
 `operationLocation` is the default display because it is stable and usually
-enough to answer "which rule did this?" `valueLocation` should be shown in
-expanded output once it exists.
+enough to answer "which rule did this?" `valueLocation` is available in JSON
+provenance and `explain --json` for tools that need to jump to the exact rule
+leaf. When exact child source cannot be found, Pump omits `valueLocation` and
+falls back to `operationLocation`.
 
 ## Open Questions
 
