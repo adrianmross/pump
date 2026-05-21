@@ -1,12 +1,10 @@
-# Release Scaffold
+# Release Process
 
 Pump uses `cargo-dist` as the Rust-native release system.
 
-The release setup is intentionally staged but not published by default. Keep it
-local/manual until the release policy is settled.
-
 Use the [public release checklist](public-release-checklist.md) as the gate
-before changing repository visibility or running a public release path.
+before changing repository visibility, running a public release path, or
+publishing a Homebrew tap update.
 
 ## Current Contract
 
@@ -22,8 +20,11 @@ before changing repository visibility or running a public release path.
 - `dist build` produces local release artifacts under `target/distrib/`.
 - Homebrew and shell installers are configured through `cargo-dist`, not a
   hand-written archive workflow.
-- The checked-in release workflow is manual and builds artifacts only. It does
-  not run `dist host`, create GitHub releases, or update a tap.
+- The checked-in release workflow is manual. Dispatching it with a real tag runs
+  `dist host`, creates the GitHub Release, and uploads release artifacts.
+- The release workflow does not update the Homebrew tap. Until tap automation is
+  added intentionally, copy the generated `pump.rb` formula into the public tap,
+  commit it there, push it, and validate `brew install`.
 
 ## Local Checks
 
@@ -36,21 +37,18 @@ make dist-build
 `make dist-build` builds local artifacts only. It does not push tags, create
 GitHub releases, update a tap, or publish packages.
 
-## Before Running Any Remote Release
+## Remote Release
 
 - Move relevant `CHANGELOG.md` entries from `Unreleased` into the release
   version.
 - Create and inspect the tag locally.
-- Run `dist plan` and inspect the generated manifest.
-- Decide whether the Homebrew tap update should be generated but held locally,
-  opened as a PR, or applied by automation.
-- Confirm the repository variables/secrets needed by `cargo-dist` are set.
-- Add a guarded publish job that runs `dist host` only after the policy and
-  credentials are settled.
+- Run `dist plan --tag vX.Y.Z` and inspect the generated manifest.
+- Push `main` and the tag after local validation passes.
+- Dispatch the release workflow with the exact tag.
+- Verify the GitHub Release and all expected assets exist before updating the
+  Homebrew tap.
 
-## Remote Actions To Avoid Until Ready
-
-Do not run these casually:
+Release commands:
 
 ```sh
 git push origin main
@@ -58,5 +56,19 @@ git push origin vX.Y.Z
 gh workflow run release.yml -f tag=vX.Y.Z
 ```
 
-The workflow files are scaffolding for later. Local validation should be enough
-until release automation is intentionally enabled.
+## Homebrew Tap
+
+After the GitHub Release is verified:
+
+```sh
+gh release download vX.Y.Z --repo adrianmross/pump --pattern pump.rb --dir /tmp/pump-release
+cp /tmp/pump-release/pump.rb /path/to/homebrew-tap/Formula/pump.rb
+```
+
+Commit and push the tap change, then validate from Homebrew:
+
+```sh
+brew update
+brew install adrianmross/tap/pump
+pump --version
+```

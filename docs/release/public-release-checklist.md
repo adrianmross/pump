@@ -6,7 +6,8 @@ automation trigger.
 
 Do not make the repository public, push release tags, run release workflows,
 publish artifacts, or update a Homebrew tap until this checklist has been
-reviewed and explicitly approved.
+reviewed and explicitly approved. After approval, continue using this checklist
+as the release gate for each pre-stable release.
 
 ## Readiness Gates
 
@@ -87,6 +88,9 @@ git push origin vX.Y.Z
 gh workflow run release.yml -f tag=vX.Y.Z
 ```
 
+The release workflow is manual by design. It should only publish when dispatched
+with an explicit tag, and ordinary pushes or merges must not create releases.
+
 ## Homebrew Decision
 
 Before publishing Homebrew support:
@@ -97,7 +101,9 @@ Before publishing Homebrew support:
 - Confirm the formula downloads from the chosen release artifact host.
 - Test the generated `pump.rb` locally before publishing tap changes.
 
-Until this is settled, Homebrew remains configured-but-held packaging.
+The v0.1.0 path is manual tap publishing: download the `pump.rb` release asset,
+copy it into `adrianmross/homebrew-tap`, commit and push the tap, then validate
+`brew install adrianmross/tap/pump`.
 
 ## Rollback And Pause Criteria
 

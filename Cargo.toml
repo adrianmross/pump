@@ -38,5 +38,7 @@ install-updater = false
 formula = "pump"
 # Which actions to run on pull requests
 pr-run-mode = "plan"
+# Trigger releases manually from GitHub Actions so publishing remains explicit.
+dispatch-releases = true
 # Where to host releases
 hosting = "github"
