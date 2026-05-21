@@ -4,6 +4,10 @@ metadata:
   name: billing-api
   labels:
     app.kubernetes.io/name: billing-api
+    app.kubernetes.io/managed-by: hand-authored
+    platform.example.com/tier: api
+  annotations:
+    pump.dev/author-note: remove before delivery
 spec:
   replicas: 3
   selector:
@@ -18,7 +22,11 @@ spec:
         - name: billing-api
           image: ghcr.io/example/billing-api:v1.4.2
           ports:
-            - containerPort: 8080
+            - name: http
+              containerPort: 8080
+          resources:
+            requests:
+              cpu: 250m
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -26,6 +34,9 @@ metadata:
   name: worker
   labels:
     app.kubernetes.io/name: worker
+    platform.example.com/tier: worker
+  annotations:
+    pump.dev/author-note: remove before delivery
 spec:
   selector:
     matchLabels:
@@ -38,3 +49,18 @@ spec:
       containers:
         - name: worker
           image: ghcr.io/example/worker:v1.4.2
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: billing-api
+  labels:
+    app.kubernetes.io/name: billing-api
+  annotations:
+    pump.dev/author-note: service author hint
+spec:
+  selector:
+    app.kubernetes.io/name: billing-api
+  ports:
+    - name: http
+      port: 80

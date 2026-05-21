@@ -1,6 +1,18 @@
 rules:
+  - name: managed-object-labels
+    match: "$.metadata.labels"
+    defaults:
+      app.kubernetes.io/part-of: billing
+    overrides:
+      app.kubernetes.io/managed-by: pump
+  - name: drop-author-hints
+    match: "$.metadata.annotations"
+    delete:
+      - pump\.dev/author-note
   - name: deployment-platform-defaults
     match: "$.spec.template.spec"
+    apiVersion: apps/v1
+    kind: Deployment
     defaults:
       securityContext:
         runAsNonRoot: true
@@ -8,13 +20,31 @@ rules:
           type: RuntimeDefault
   - name: deployment-replica-default
     match: "$.spec"
+    apiVersion: apps/v1
+    kind: Deployment
     defaults:
       replicas: 2
   - name: container-runtime-defaults
     match: "$.spec.template.spec.containers.*"
+    apiVersion: apps/v1
+    kind: Deployment
     defaults:
       imagePullPolicy: IfNotPresent
       resources:
         requests:
           cpu: 100m
           memory: 128Mi
+  - name: billing-service-defaults
+    match: "$.spec"
+    apiVersion: v1
+    kind: Service
+    metadataName: billing-api
+    defaults:
+      type: ClusterIP
+  - name: service-port-defaults
+    match: "$.spec.ports.*"
+    apiVersion: v1
+    kind: Service
+    defaults:
+      protocol: TCP
+      targetPort: http

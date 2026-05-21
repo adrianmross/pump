@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::fs;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
@@ -99,8 +100,12 @@ enum Commands {
 
     #[command(about = "Validate that input and rules can be inflated")]
     Check {
-        #[arg(help = "Input JSON/YAML file")]
-        input: PathBuf,
+        #[arg(
+            value_name = "INPUT",
+            required = true,
+            help = "Input JSON/YAML file(s)"
+        )]
+        inputs: Vec<PathBuf>,
 
         #[arg(short, long, help = "Pump rule file")]
         rules: PathBuf,
@@ -171,6 +176,35 @@ struct ProvenanceEntry {
 
 type Provenance = HashMap<String, ProvenanceEntry>;
 
+#[derive(Debug, Clone, Serialize)]
+struct RuleTrace {
+    doc: usize,
+    rule: String,
+    rule_index: usize,
+    match_path: String,
+    decision: String,
+    reason: String,
+    target_paths: Vec<String>,
+    operations: Vec<OperationTrace>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct OperationTrace {
+    operation: String,
+    path: String,
+    outcome: String,
+    reason: String,
+    before: Option<Value>,
+    after: Option<Value>,
+}
+
+#[derive(Debug)]
+struct CheckResult {
+    documents: usize,
+    generated: usize,
+    changed: bool,
+}
+
 #[derive(Debug, Serialize)]
 struct ProvenanceOutput {
     entries: Vec<ProvenanceEntry>,
@@ -182,6 +216,7 @@ struct ExplainEntry {
     path: String,
     value: Value,
     source: ExplainSource,
+    trace: Vec<RuleTrace>,
 }
 
 #[derive(Debug, Serialize)]
@@ -274,8 +309,9 @@ fn main() -> Result<()> {
             let mut docs = read_input(&input)?;
             let rule_file = read_rules(&rules)?;
             let mut provenance = HashMap::new();
-            inflate(&mut docs, &rule_file, &mut provenance)?;
-            explain(&docs, &provenance, &path, json)?;
+            let mut traces = Vec::new();
+            inflate_with_traces(&mut docs, &rule_file, &mut provenance, Some(&mut traces))?;
+            explain(&docs, &provenance, &traces, &path, json)?;
         }
         Commands::Diff {
             input,
@@ -291,15 +327,14 @@ fn main() -> Result<()> {
             print_diff(&before, &after, "inflated");
         }
         Commands::Check {
-            input,
+            inputs,
             rules,
             strict,
             write,
             format,
         } => {
-            let mut docs = read_input(&input)?;
             let rule_file = read_rules(&rules)?;
-            check(&input, &rule_file, &mut docs, strict, write, format)?;
+            check_inputs(&inputs, &rule_file, strict, write, format)?;
         }
     }
 
@@ -375,23 +410,60 @@ fn validate_rule(rule: &Rule) -> Result<()> {
 }
 
 fn inflate(docs: &mut [Value], rule_file: &RuleFile, provenance: &mut Provenance) -> Result<()> {
+    inflate_with_traces(docs, rule_file, provenance, None)
+}
+
+fn inflate_with_traces(
+    docs: &mut [Value],
+    rule_file: &RuleFile,
+    provenance: &mut Provenance,
+    mut traces: Option<&mut Vec<RuleTrace>>,
+) -> Result<()> {
     validate_rules(rule_file)?;
 
-    for rule in &rule_file.rules {
+    for (rule_index, rule) in rule_file.rules.iter().enumerate() {
         let segments = parse_path(&rule.match_path)
             .with_context(|| format!("invalid match path for rule {}", rule.name))?;
 
         for (doc_index, doc) in docs.iter_mut().enumerate() {
-            if !rule_matches_doc(rule, doc) {
+            let mut trace = RuleTrace {
+                doc: doc_index,
+                rule: rule.name.clone(),
+                rule_index,
+                match_path: rule.match_path.clone(),
+                decision: "skipped".to_string(),
+                reason: String::new(),
+                target_paths: Vec::new(),
+                operations: Vec::new(),
+            };
+
+            if let Some(reason) = rule_skip_reason(rule, doc) {
+                trace.reason = reason;
+                if let Some(traces) = traces.as_deref_mut() {
+                    traces.push(trace);
+                }
                 continue;
             }
 
             let target_paths = matching_paths(doc, &segments);
+            trace.target_paths = target_paths
+                .iter()
+                .map(|path| json_pointer(path))
+                .collect::<Vec<_>>();
+
+            if target_paths.is_empty() {
+                trace.reason = "match path matched no values".to_string();
+                if let Some(traces) = traces.as_deref_mut() {
+                    traces.push(trace);
+                }
+                continue;
+            }
 
             for target_path in target_paths {
                 if let Some(replacement) = &rule.replace
                     && let Some(target) = get_mut_at_path(doc, &target_path)
                 {
+                    let before = target.clone();
                     *target = replacement.clone();
                     record_generated_paths(
                         doc_index,
@@ -402,6 +474,14 @@ fn inflate(docs: &mut [Value], rule_file: &RuleFile, provenance: &mut Provenance
                         "value replaced by rule",
                         provenance,
                     );
+                    trace.operations.push(OperationTrace {
+                        operation: "replace".to_string(),
+                        path: json_pointer(&target_path),
+                        outcome: "replaced".to_string(),
+                        reason: "value replaced by rule".to_string(),
+                        before: Some(before),
+                        after: Some(replacement.clone()),
+                    });
                     continue;
                 }
 
@@ -415,6 +495,7 @@ fn inflate(docs: &mut [Value], rule_file: &RuleFile, provenance: &mut Provenance
                         &target_path,
                         &rule.name,
                         provenance,
+                        Some(&mut trace.operations),
                     );
                 }
 
@@ -428,6 +509,7 @@ fn inflate(docs: &mut [Value], rule_file: &RuleFile, provenance: &mut Provenance
                         &target_path,
                         &rule.name,
                         provenance,
+                        Some(&mut trace.operations),
                     );
                 }
 
@@ -438,8 +520,27 @@ fn inflate(docs: &mut [Value], rule_file: &RuleFile, provenance: &mut Provenance
                     &rule.delete,
                     &rule.name,
                     provenance,
+                    Some(&mut trace.operations),
                 )
                 .with_context(|| format!("invalid delete path for rule {}", rule.name))?;
+            }
+
+            trace.decision = "applied".to_string();
+            trace.reason = if trace.operations.is_empty() {
+                format!(
+                    "matched {} target path(s), no values changed",
+                    trace.target_paths.len()
+                )
+            } else {
+                format!(
+                    "matched {} target path(s), {} operation(s) changed values",
+                    trace.target_paths.len(),
+                    trace.operations.len()
+                )
+            };
+
+            if let Some(traces) = traces.as_deref_mut() {
+                traces.push(trace);
             }
         }
     }
@@ -495,8 +596,131 @@ fn check(
     write: bool,
     format: Option<OutputFormat>,
 ) -> Result<()> {
+    let result = check_docs(
+        input_path, rule_file, docs, strict, write, format, "inflated",
+    )?;
+
+    if write {
+        println!(
+            "wrote: {} document(s), {} rule(s), {} generated value(s)",
+            result.documents,
+            rule_file.rules.len(),
+            result.generated
+        );
+        return Ok(());
+    }
+
+    if strict && result.changed {
+        io::stdout().flush()?;
+        bail!(
+            "strict check failed: applying rules would change {}",
+            input_path.display()
+        );
+    }
+
+    println!(
+        "ok: {} document(s), {} rule(s), {} generated value(s)",
+        result.documents,
+        rule_file.rules.len(),
+        result.generated
+    );
+
+    Ok(())
+}
+
+fn check_inputs(
+    input_paths: &[PathBuf],
+    rule_file: &RuleFile,
+    strict: bool,
+    write: bool,
+    format: Option<OutputFormat>,
+) -> Result<()> {
+    if input_paths.len() == 1 {
+        let input_path = &input_paths[0];
+        let mut docs = read_input(input_path)?;
+        return check(input_path, rule_file, &mut docs, strict, write, format);
+    }
+
+    let mut total_documents = 0;
+    let mut total_generated = 0;
+    let mut changed_files = 0;
+
+    for input_path in input_paths {
+        let mut docs = read_input(input_path)?;
+        let result = check_docs(
+            input_path,
+            rule_file,
+            &mut docs,
+            strict,
+            write,
+            format,
+            &format!("inflated: {}", input_path.display()),
+        )?;
+
+        total_documents += result.documents;
+        total_generated += result.generated;
+
+        if result.changed {
+            changed_files += 1;
+        }
+
+        if write {
+            println!(
+                "wrote: {}: {} document(s), {} generated value(s)",
+                input_path.display(),
+                result.documents,
+                result.generated
+            );
+        } else if strict && result.changed {
+            println!(
+                "changed: {}: {} document(s), {} generated value(s)",
+                input_path.display(),
+                result.documents,
+                result.generated
+            );
+        } else {
+            println!(
+                "ok: {}: {} document(s), {} generated value(s)",
+                input_path.display(),
+                result.documents,
+                result.generated
+            );
+        }
+    }
+
+    if strict && changed_files > 0 {
+        io::stdout().flush()?;
+        bail!(
+            "strict check failed: applying rules would change {} of {} file(s)",
+            changed_files,
+            input_paths.len()
+        );
+    }
+
+    let action = if write { "wrote" } else { "ok" };
+    println!(
+        "{action}: {} file(s), {} document(s), {} rule(s), {} generated value(s)",
+        input_paths.len(),
+        total_documents,
+        rule_file.rules.len(),
+        total_generated
+    );
+
+    Ok(())
+}
+
+fn check_docs(
+    input_path: &Path,
+    rule_file: &RuleFile,
+    docs: &mut [Value],
+    strict: bool,
+    write: bool,
+    format: Option<OutputFormat>,
+    diff_name: &str,
+) -> Result<CheckResult> {
     let output_format = output_format(input_path, Some(input_path), format);
-    let before = (strict || write)
+    let should_diff = strict && !write;
+    let before = should_diff
         .then(|| format_docs(docs, output_format))
         .transpose()?;
     let mut provenance = HashMap::new();
@@ -505,36 +729,27 @@ fn check(
 
     if write {
         write_output(docs, input_path, Some(input_path), format)?;
-        println!(
-            "wrote: {} document(s), {} rule(s), {} generated value(s)",
-            docs.len(),
-            rule_file.rules.len(),
-            provenance.len()
-        );
-        return Ok(());
     }
 
-    if strict {
+    let changed = if should_diff {
         let before = before.expect("strict check should capture input before inflate");
         let after = format_docs(docs, output_format)?;
 
         if before != after {
-            print_diff(&before, &after, "inflated");
-            bail!(
-                "strict check failed: applying rules would change {}",
-                input_path.display()
-            );
+            print_diff(&before, &after, diff_name);
+            true
+        } else {
+            false
         }
-    }
+    } else {
+        false
+    };
 
-    println!(
-        "ok: {} document(s), {} rule(s), {} generated value(s)",
-        docs.len(),
-        rule_file.rules.len(),
-        provenance.len()
-    );
-
-    Ok(())
+    Ok(CheckResult {
+        documents: docs.len(),
+        generated: provenance.len(),
+        changed,
+    })
 }
 
 fn apply_defaults(
@@ -544,6 +759,7 @@ fn apply_defaults(
     path: &[String],
     rule_name: &str,
     provenance: &mut Provenance,
+    mut operations: Option<&mut Vec<OperationTrace>>,
 ) {
     let (Value::Object(target_map), Value::Object(default_map)) = (target, defaults) else {
         return;
@@ -562,6 +778,7 @@ fn apply_defaults(
                     &child_path,
                     rule_name,
                     provenance,
+                    operations.as_deref_mut(),
                 );
             }
             Some(_) => {}
@@ -576,6 +793,16 @@ fn apply_defaults(
                     "field was missing in source",
                     provenance,
                 );
+                if let Some(operations) = operations.as_deref_mut() {
+                    operations.push(OperationTrace {
+                        operation: "default".to_string(),
+                        path: json_pointer(&child_path),
+                        outcome: "generated".to_string(),
+                        reason: "field was missing in source".to_string(),
+                        before: None,
+                        after: Some(default_value.clone()),
+                    });
+                }
             }
         }
     }
@@ -588,6 +815,7 @@ fn apply_overrides(
     path: &[String],
     rule_name: &str,
     provenance: &mut Provenance,
+    mut operations: Option<&mut Vec<OperationTrace>>,
 ) {
     match (target, overrides) {
         (Value::Object(target_map), Value::Object(override_map)) => {
@@ -604,9 +832,11 @@ fn apply_overrides(
                             &child_path,
                             rule_name,
                             provenance,
+                            operations.as_deref_mut(),
                         );
                     }
                     Some(existing) => {
+                        let before = existing.clone();
                         *existing = override_value.clone();
                         record_generated_paths(
                             doc_index,
@@ -617,6 +847,16 @@ fn apply_overrides(
                             "value forced by rule",
                             provenance,
                         );
+                        if let Some(operations) = operations.as_deref_mut() {
+                            operations.push(OperationTrace {
+                                operation: "override".to_string(),
+                                path: json_pointer(&child_path),
+                                outcome: "overwritten".to_string(),
+                                reason: "value forced by rule".to_string(),
+                                before: Some(before),
+                                after: Some(override_value.clone()),
+                            });
+                        }
                     }
                     None => {
                         target_map.insert(key.clone(), override_value.clone());
@@ -629,11 +869,22 @@ fn apply_overrides(
                             "value forced by rule",
                             provenance,
                         );
+                        if let Some(operations) = operations.as_deref_mut() {
+                            operations.push(OperationTrace {
+                                operation: "override".to_string(),
+                                path: json_pointer(&child_path),
+                                outcome: "generated".to_string(),
+                                reason: "value forced by rule".to_string(),
+                                before: None,
+                                after: Some(override_value.clone()),
+                            });
+                        }
                     }
                 }
             }
         }
         (target, overrides) => {
+            let before = target.clone();
             *target = overrides.clone();
             record_generated_paths(
                 doc_index,
@@ -644,6 +895,16 @@ fn apply_overrides(
                 "value forced by rule",
                 provenance,
             );
+            if let Some(operations) = operations {
+                operations.push(OperationTrace {
+                    operation: "override".to_string(),
+                    path: json_pointer(path),
+                    outcome: "overwritten".to_string(),
+                    reason: "value forced by rule".to_string(),
+                    before: Some(before),
+                    after: Some(overrides.clone()),
+                });
+            }
         }
     }
 }
@@ -695,6 +956,7 @@ fn apply_delete_paths(
     delete_paths: &[String],
     rule_name: &str,
     provenance: &mut Provenance,
+    mut operations: Option<&mut Vec<OperationTrace>>,
 ) -> Result<()> {
     for delete_path in delete_paths {
         let segments = parse_rule_path(delete_path, base_path)?;
@@ -714,7 +976,17 @@ fn apply_delete_paths(
                 "value removed by rule",
                 provenance,
             );
-            remove_at_path(doc, &path);
+            let before = remove_at_path(doc, &path);
+            if let Some(operations) = operations.as_deref_mut() {
+                operations.push(OperationTrace {
+                    operation: "delete".to_string(),
+                    path: json_pointer(&path),
+                    outcome: "deleted".to_string(),
+                    reason: "value removed by rule".to_string(),
+                    before,
+                    after: None,
+                });
+            }
         }
     }
 
@@ -784,25 +1056,53 @@ fn record_provenance(
 }
 
 fn rule_matches_doc(rule: &Rule, doc: &Value) -> bool {
-    selector_matches(doc, &["apiVersion"], rule.api_version.as_deref())
-        && selector_matches(doc, &["kind"], rule.kind.as_deref())
-        && selector_matches(doc, &["metadata", "name"], rule.metadata_name.as_deref())
+    rule_skip_reason(rule, doc).is_none()
 }
 
-fn selector_matches(doc: &Value, path: &[&str], expected: Option<&str>) -> bool {
-    let Some(expected) = expected else {
-        return true;
-    };
+fn rule_skip_reason(rule: &Rule, doc: &Value) -> Option<String> {
+    selector_skip_reason(
+        doc,
+        &["apiVersion"],
+        "apiVersion",
+        rule.api_version.as_deref(),
+    )
+    .or_else(|| selector_skip_reason(doc, &["kind"], "kind", rule.kind.as_deref()))
+    .or_else(|| {
+        selector_skip_reason(
+            doc,
+            &["metadata", "name"],
+            "metadata.name",
+            rule.metadata_name.as_deref(),
+        )
+    })
+}
+
+fn selector_skip_reason(
+    doc: &Value,
+    path: &[&str],
+    label: &str,
+    expected: Option<&str>,
+) -> Option<String> {
+    let expected = expected?;
 
     let mut current = doc;
     for segment in path {
         let Some(next) = value_child(current, segment) else {
-            return false;
+            return Some(format!(
+                "selector {label} expected {expected}, but path is missing"
+            ));
         };
         current = next;
     }
 
-    current.as_str() == Some(expected)
+    if current.as_str() == Some(expected) {
+        None
+    } else {
+        Some(format!(
+            "selector {label} expected {expected}, got {}",
+            format_inline(current)
+        ))
+    }
 }
 
 fn paths_overlap(protected: &[Segment], path: &[String]) -> bool {
@@ -871,7 +1171,13 @@ fn record_generated_paths(
     }
 }
 
-fn explain(docs: &[Value], provenance: &Provenance, query: &str, json: bool) -> Result<()> {
+fn explain(
+    docs: &[Value],
+    provenance: &Provenance,
+    traces: &[RuleTrace],
+    query: &str,
+    json: bool,
+) -> Result<()> {
     let segments = parse_path(query)?;
     let mut found = false;
     let mut entries = Vec::new();
@@ -884,12 +1190,14 @@ fn explain(docs: &[Value], provenance: &Provenance, query: &str, json: bool) -> 
             };
 
             let source = provenance.get(&provenance_key(doc_index, &path));
+            let entry_traces = traces_for_doc(traces, doc_index);
 
             if json {
                 entries.push(ExplainEntry {
                     doc: doc_index,
                     path: json_pointer(&path),
                     value: value.clone(),
+                    trace: entry_traces,
                     source: source.map_or_else(
                         || ExplainSource {
                             source_type: "input".to_string(),
@@ -924,6 +1232,8 @@ fn explain(docs: &[Value], provenance: &Provenance, query: &str, json: bool) -> 
                 println!("source: input");
                 println!("reason: authored value or existing container");
             }
+
+            print_trace(&entry_traces, &path);
         }
     }
 
@@ -936,6 +1246,61 @@ fn explain(docs: &[Value], provenance: &Provenance, query: &str, json: bool) -> 
     }
 
     Ok(())
+}
+
+fn traces_for_doc(traces: &[RuleTrace], doc_index: usize) -> Vec<RuleTrace> {
+    traces
+        .iter()
+        .filter(|trace| trace.doc == doc_index)
+        .cloned()
+        .collect()
+}
+
+fn print_trace(traces: &[RuleTrace], path: &[String]) {
+    if traces.is_empty() {
+        return;
+    }
+
+    let query_path = json_pointer(path);
+    println!("trace:");
+
+    for trace in traces {
+        let related_operations = trace
+            .operations
+            .iter()
+            .filter(|operation| paths_are_related(&operation.path, &query_path))
+            .collect::<Vec<_>>();
+
+        if related_operations.is_empty() {
+            println!("- {}: {} ({})", trace.rule, trace.decision, trace.reason);
+            continue;
+        }
+
+        for operation in related_operations {
+            println!(
+                "- {}: {} {} {} ({})",
+                trace.rule,
+                operation.operation,
+                operation.path,
+                operation.outcome,
+                operation.reason
+            );
+        }
+    }
+}
+
+fn paths_are_related(left: &str, right: &str) -> bool {
+    left == right || path_is_ancestor(left, right) || path_is_ancestor(right, left)
+}
+
+fn path_is_ancestor(parent: &str, child: &str) -> bool {
+    if parent.is_empty() {
+        return true;
+    }
+
+    child
+        .strip_prefix(parent)
+        .is_some_and(|remaining| remaining.starts_with('/'))
 }
 
 fn matching_paths(value: &Value, segments: &[Segment]) -> Vec<Vec<String>> {
@@ -1278,6 +1643,7 @@ fn json_pointer(path: &[String]) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     fn rules() -> RuleFile {
         serde_yml::from_str(
@@ -1292,6 +1658,15 @@ rules:
 "#,
         )
         .unwrap()
+    }
+
+    fn temp_input_path(name: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+
+        std::env::temp_dir().join(format!("pump-{name}-{}-{nanos}.json", std::process::id()))
     }
 
     #[test]
@@ -1422,6 +1797,46 @@ rules:
 
         assert_eq!(docs[0]["spec"]["replicas"], json!(2));
         assert!(docs[1]["spec"].get("replicas").is_none());
+    }
+
+    #[test]
+    fn inflate_with_traces_records_applied_and_skipped_rules() {
+        let rule_file: RuleFile = serde_yml::from_str(
+            r#"
+rules:
+  - name: deployment-defaults
+    match: "$.spec"
+    apiVersion: apps/v1
+    kind: Deployment
+    defaults:
+      replicas: 2
+  - name: service-defaults
+    match: "$.spec"
+    apiVersion: v1
+    kind: Service
+    defaults:
+      type: ClusterIP
+"#,
+        )
+        .unwrap();
+        let mut docs = vec![json!({
+            "apiVersion": "apps/v1",
+            "kind": "Deployment",
+            "metadata": {"name": "api"},
+            "spec": {}
+        })];
+        let mut provenance = HashMap::new();
+        let mut traces = Vec::new();
+
+        inflate_with_traces(&mut docs, &rule_file, &mut provenance, Some(&mut traces)).unwrap();
+
+        assert_eq!(docs[0]["spec"]["replicas"], json!(2));
+        assert_eq!(traces.len(), 2);
+        assert_eq!(traces[0].decision, "applied");
+        assert_eq!(traces[0].operations[0].path, "/spec/replicas");
+        assert_eq!(traces[0].operations[0].outcome, "generated");
+        assert_eq!(traces[1].decision, "skipped");
+        assert!(traces[1].reason.contains("selector apiVersion expected v1"));
     }
 
     #[test]
@@ -1609,6 +2024,60 @@ rules:
 
         assert_eq!(docs[0]["first"]["bottom"], json!("z"));
         fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn multi_input_check_validates_all_files_without_writing() {
+        let first = temp_input_path("multi-check-first");
+        let second = temp_input_path("multi-check-second");
+        fs::write(&first, r#"{"first":{"top":"a","middle":5}}"#).unwrap();
+        fs::write(&second, r#"{"second":{"top":"b","middle":5}}"#).unwrap();
+        let first_before = fs::read_to_string(&first).unwrap();
+        let second_before = fs::read_to_string(&second).unwrap();
+        let inputs = vec![first.clone(), second.clone()];
+
+        check_inputs(&inputs, &rules(), false, false, Some(OutputFormat::Json)).unwrap();
+
+        assert_eq!(fs::read_to_string(&first).unwrap(), first_before);
+        assert_eq!(fs::read_to_string(&second).unwrap(), second_before);
+        fs::remove_file(first).ok();
+        fs::remove_file(second).ok();
+    }
+
+    #[test]
+    fn multi_input_strict_checks_every_file_before_failing() {
+        let first = temp_input_path("multi-strict-first");
+        let second = temp_input_path("multi-strict-second");
+        fs::write(&first, r#"{"first":{"top":"a","middle":5}}"#).unwrap();
+        fs::write(&second, r#"{"second":{"top":"b","middle":5}}"#).unwrap();
+        let inputs = vec![first.clone(), second.clone()];
+
+        let err = check_inputs(&inputs, &rules(), true, false, Some(OutputFormat::Json))
+            .expect_err("strict multi-input check should fail when any input would change");
+
+        assert!(err.to_string().contains("2 of 2 file(s)"));
+        fs::remove_file(first).ok();
+        fs::remove_file(second).ok();
+    }
+
+    #[test]
+    fn multi_input_write_inflates_each_file_in_place() {
+        let first = temp_input_path("multi-write-first");
+        let second = temp_input_path("multi-write-second");
+        fs::write(&first, r#"{"first":{"top":"a","middle":5}}"#).unwrap();
+        fs::write(&second, r#"{"second":{"top":"b","middle":5}}"#).unwrap();
+        let inputs = vec![first.clone(), second.clone()];
+
+        check_inputs(&inputs, &rules(), false, true, Some(OutputFormat::Json)).unwrap();
+
+        let first_doc: Value = serde_json::from_str(&fs::read_to_string(&first).unwrap()).unwrap();
+        let second_doc: Value =
+            serde_json::from_str(&fs::read_to_string(&second).unwrap()).unwrap();
+
+        assert_eq!(first_doc["first"]["bottom"], json!("z"));
+        assert_eq!(second_doc["second"]["bottom"], json!("z"));
+        fs::remove_file(first).ok();
+        fs::remove_file(second).ok();
     }
 
     #[test]

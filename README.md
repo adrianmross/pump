@@ -45,6 +45,7 @@ pump diff app.yaml --rules platform.pump.yaml
 pump check app.yaml --rules platform.pump.yaml
 pump check rendered.yaml --rules platform.pump.yaml --strict
 pump check app.yaml --rules platform.pump.yaml --write
+pump check services/*.yaml --rules platform.pump.yaml --strict
 ```
 
 Short aliases may be useful once the semantics are stable:
@@ -126,6 +127,10 @@ cargo run -- inflate examples/kubernetes/source.yaml --rules examples/kubernetes
 cargo run -- explain examples/kubernetes/source.yaml --rules examples/kubernetes/rules.pump.yaml --path '$.spec.template.spec.containers.*.resources.requests.cpu'
 ```
 
+See [the Kubernetes example](examples/kubernetes/README.md) for a small
+GitOps-style sparse/inflated workflow with generated labels, workload defaults,
+Service defaults, deletes, overrides, and provenance.
+
 Biome-style checking:
 
 ```sh
@@ -140,6 +145,12 @@ pump check app.yaml --rules platform.pump.yaml --fix
   file.
 - `check --write` inflates the file in place.
 - `check --fix` is an alias for `--write`.
+- `check` accepts one or more input files; multi-file strict mode evaluates
+  every file before failing.
+
+`explain` also prints a rule trace showing which rules were applied or skipped
+for the inspected document. Use `--json` when that trace needs to feed another
+tool.
 
 To refresh the README terminal demo after CLI semantics settle:
 
@@ -179,6 +190,10 @@ merge.
 - Replacing Jsonnet, CUE, Helm, or Kustomize.
 - Arbitrary programming inside rule files.
 - Hidden mutation without an inspectable rendered artifact.
+
+See [provenance](docs/provenance.md) for the current explain/provenance model,
+and [adjacent tools](docs/adjacent-tools.md) for Pump's intended wedge beside
+Jsonnet, CUE, Kustomize, Helm, ytt, and kpt.
 
 ## Current limitations
 
