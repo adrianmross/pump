@@ -84,6 +84,12 @@ enum Commands {
 
         #[arg(long, help = "Print machine-readable JSON")]
         json: bool,
+
+        #[arg(
+            long,
+            help = "Include the full rule trace, not just related operations"
+        )]
+        all: bool,
     },
 
     #[command(about = "Show a unified diff from input to inflated output")]
@@ -305,13 +311,14 @@ fn main() -> Result<()> {
             rules,
             path,
             json,
+            all,
         } => {
             let mut docs = read_input(&input)?;
             let rule_file = read_rules(&rules)?;
             let mut provenance = HashMap::new();
             let mut traces = Vec::new();
             inflate_with_traces(&mut docs, &rule_file, &mut provenance, Some(&mut traces))?;
-            explain(&docs, &provenance, &traces, &path, json)?;
+            explain(&docs, &provenance, &traces, &path, json, all)?;
         }
         Commands::Diff {
             input,
@@ -1177,6 +1184,7 @@ fn explain(
     traces: &[RuleTrace],
     query: &str,
     json: bool,
+    all: bool,
 ) -> Result<()> {
     let segments = parse_path(query)?;
     let mut found = false;
@@ -1190,7 +1198,7 @@ fn explain(
             };
 
             let source = provenance.get(&provenance_key(doc_index, &path));
-            let entry_traces = traces_for_doc(traces, doc_index);
+            let entry_traces = traces_for_doc(traces, doc_index, &path, all);
 
             if json {
                 entries.push(ExplainEntry {
@@ -1233,7 +1241,7 @@ fn explain(
                 println!("reason: authored value or existing container");
             }
 
-            print_trace(&entry_traces, &path);
+            print_trace(&entry_traces);
         }
     }
 
@@ -1248,28 +1256,50 @@ fn explain(
     Ok(())
 }
 
-fn traces_for_doc(traces: &[RuleTrace], doc_index: usize) -> Vec<RuleTrace> {
+fn traces_for_doc(
+    traces: &[RuleTrace],
+    doc_index: usize,
+    path: &[String],
+    include_all: bool,
+) -> Vec<RuleTrace> {
+    let query_path = json_pointer(path);
+
     traces
         .iter()
         .filter(|trace| trace.doc == doc_index)
-        .cloned()
+        .filter_map(|trace| {
+            if include_all {
+                return Some(trace.clone());
+            }
+
+            let related_operations = trace
+                .operations
+                .iter()
+                .filter(|operation| paths_are_related(&operation.path, &query_path))
+                .cloned()
+                .collect::<Vec<_>>();
+
+            if related_operations.is_empty() {
+                return None;
+            }
+
+            Some(RuleTrace {
+                operations: related_operations,
+                ..trace.clone()
+            })
+        })
         .collect()
 }
 
-fn print_trace(traces: &[RuleTrace], path: &[String]) {
+fn print_trace(traces: &[RuleTrace]) {
     if traces.is_empty() {
         return;
     }
 
-    let query_path = json_pointer(path);
     println!("trace:");
 
     for trace in traces {
-        let related_operations = trace
-            .operations
-            .iter()
-            .filter(|operation| paths_are_related(&operation.path, &query_path))
-            .collect::<Vec<_>>();
+        let related_operations = trace.operations.iter().collect::<Vec<_>>();
 
         if related_operations.is_empty() {
             println!("- {}: {} ({})", trace.rule, trace.decision, trace.reason);
@@ -1837,6 +1867,15 @@ rules:
         assert_eq!(traces[0].operations[0].outcome, "generated");
         assert_eq!(traces[1].decision, "skipped");
         assert!(traces[1].reason.contains("selector apiVersion expected v1"));
+
+        let query_path = vec!["spec".to_string(), "replicas".to_string()];
+        let related = traces_for_doc(&traces, 0, &query_path, false);
+        let all = traces_for_doc(&traces, 0, &query_path, true);
+
+        assert_eq!(related.len(), 1);
+        assert_eq!(related[0].rule, "deployment-defaults");
+        assert_eq!(related[0].operations.len(), 1);
+        assert_eq!(all.len(), 2);
     }
 
     #[test]

@@ -11,6 +11,8 @@
   `metadata.name`.
 - Add machine-readable provenance output, JSON explain output, and rule
   execution traces in `explain`.
+- Default `explain` traces to operations related to the inspected path, with
+  `--all` for the full document rule trace.
 - Support multi-file `check`, including strict drift detection and in-place
   `--write` / `--fix` enforcement across multiple inputs.
 - Add a richer Kubernetes/GitOps example and adjacent-tool positioning notes.

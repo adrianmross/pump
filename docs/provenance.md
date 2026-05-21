@@ -12,8 +12,10 @@ Each entry records the document index, JSON Pointer path, rule name, operation,
 and reason.
 
 `explain` inflates the input, prints the final value for the requested path, and
-reports whether the value came from input or a rule. It also prints an execution
-trace for the document:
+reports whether the value came from input or a rule. By default it prints only
+the rule operations related to the inspected path.
+
+Add `--all` when debugging rule behavior and the full document trace is useful:
 
 - rules skipped by selectors;
 - rules whose match path found no values;
@@ -26,6 +28,10 @@ Use JSON mode for automation:
 pump explain app.yaml --rules platform.pump.yaml \
   --path '$.spec.template.spec.containers.*.resources.requests.memory' \
   --json
+
+pump explain app.yaml --rules platform.pump.yaml \
+  --path '$.spec.template.spec.containers.*.resources.requests.memory' \
+  --all
 ```
 
 ## Source Locations
@@ -44,14 +50,36 @@ The first useful slice should attach operation-level locations:
 - `/rules/0/delete`
 - `/rules/0/replace`
 
-Leaf-level locations can come later. They require carrying each relative value
-path from a rule operation through `record_generated_paths`.
+Leaf-level value locations should be added as a second layer and treated as
+best-effort detail. They require carrying each relative value path from a rule
+operation through `record_generated_paths`.
+
+The intended shape is:
+
+```json
+{
+  "rule": "container-runtime-defaults",
+  "operation": "defaults",
+  "operationLocation": {
+    "file": "rules.pump.yaml",
+    "line": 12,
+    "column": 5
+  },
+  "valueLocation": {
+    "file": "rules.pump.yaml",
+    "line": 18,
+    "column": 11
+  }
+}
+```
+
+`operationLocation` should be the default display because it is stable and
+usually enough to answer "which rule did this?" `valueLocation` should be shown
+in expanded output once it exists.
 
 ## Open Questions
 
 - Should JSON rule files get source locations in v1, or should rule files stay
   YAML-only until the source-index path is stable?
-- Should `explain --json` include the full document trace by default, or offer a
-  smaller `--trace related` mode later?
 - Should provenance output record normalized JSON Pointer paths only, or also
   the original rule-path syntax?

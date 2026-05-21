@@ -34,6 +34,35 @@ schema design, one of the adjacent tools is probably the primary tool. Pump's
 real value is when the missing primitive is "make this repeated shape implicit,
 but keep the inflated form inspectable and reversible."
 
+## Jsonnet Boundary
+
+Making Pump programmable would mainly help with dynamic generation:
+
+- deriving many resources from a compact data model;
+- using conditionals and loops;
+- sharing local functions or imports;
+- computing values instead of only filling known shapes.
+
+That is useful, but it would move Pump toward being another configuration
+language. The cleaner boundary is to let Jsonnet own computation and let Pump
+own hydration, deflation, drift checks, and provenance.
+
+Jsonnet can produce sparse intent that Pump hydrates:
+
+```sh
+jsonnet app.jsonnet > /tmp/app.sparse.json
+pump inflate /tmp/app.sparse.json --rules platform.pump.yaml --out rendered.yaml
+```
+
+Or Pump can deflate existing manifests into data that Jsonnet imports:
+
+```sh
+pump deflate rendered.yaml --rules platform.pump.yaml --out app.sparse.yaml
+```
+
+The rule of thumb is: use Jsonnet when the shape must be computed; use Pump
+when the shape is known but repetitive and needs to stay explainable.
+
 ## Interop Shape
 
 The cleanest integration shape is an explicit pipeline:

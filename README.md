@@ -148,9 +148,9 @@ pump check app.yaml --rules platform.pump.yaml --fix
 - `check` accepts one or more input files; multi-file strict mode evaluates
   every file before failing.
 
-`explain` also prints a rule trace showing which rules were applied or skipped
-for the inspected document. Use `--json` when that trace needs to feed another
-tool.
+`explain` also prints the rule operations related to the inspected path. Add
+`--all` to include the full rule trace for the document, including skipped and
+unchanged rules. Use `--json` when that trace needs to feed another tool.
 
 To refresh the README terminal demo after CLI semantics settle:
 
