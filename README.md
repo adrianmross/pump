@@ -16,18 +16,25 @@ Pump should make repetitive JSON/YAML configuration smaller without making the
 rendered result mysterious. The rendered output must stay ordinary JSON/YAML,
 and every generated field should be explainable.
 
-## Install from source
+## Install
+
+Homebrew:
+
+```sh
+brew install adrianmross/tap/pump
+```
+
+Shell installer:
+
+```sh
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/adrianmross/pump/releases/download/v0.1.0/pump-installer.sh | sh
+```
+
+From source:
 
 ```sh
 cargo install --path .
 ```
-
-Release artifacts and Homebrew packaging are scaffolded with `cargo-dist`, but
-not published by default. See [release notes](docs/release/release.md) and
-[Homebrew notes](docs/release/homebrew.md) before enabling any remote release
-pipeline. Use the
-[public release checklist](docs/release/public-release-checklist.md) before
-changing repository visibility or running a public release.
 
 For local development:
 
