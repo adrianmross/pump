@@ -6,8 +6,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand, ValueEnum};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use serde_yml::{
+    Value,
     de::{Event, Progress},
     loader::Loader,
 };
@@ -985,16 +985,22 @@ fn apply_defaults(
     provenance: &mut Provenance,
     mut context: OperationContext<'_, '_>,
 ) {
-    let (Value::Object(target_map), Value::Object(default_map)) = (target, defaults) else {
+    let Some(target_map) = target.as_mapping_mut() else {
+        return;
+    };
+    let Some(default_map) = defaults.as_mapping() else {
         return;
     };
 
-    for (key, default_value) in default_map {
+    for (key_value, default_value) in default_map {
+        let Some(key) = key_value.as_str() else {
+            continue;
+        };
         let mut child_path = path.to_vec();
-        child_path.push(key.clone());
+        child_path.push(key.to_string());
 
         match target_map.get_mut(key) {
-            Some(existing) if existing.is_object() && default_value.is_object() => {
+            Some(existing) if existing.is_mapping() && default_value.is_mapping() => {
                 apply_defaults(
                     existing,
                     default_value,
@@ -1010,7 +1016,7 @@ fn apply_defaults(
             }
             Some(_) => {}
             None => {
-                target_map.insert(key.clone(), default_value.clone());
+                target_map.insert(key_value.clone(), default_value.clone());
                 record_generated_paths(
                     &child_path,
                     default_value,
@@ -1046,13 +1052,23 @@ fn apply_overrides(
     mut context: OperationContext<'_, '_>,
 ) {
     match (target, overrides) {
-        (Value::Object(target_map), Value::Object(override_map)) => {
-            for (key, override_value) in override_map {
+        (target, overrides) if target.is_mapping() && overrides.is_mapping() => {
+            let target_map = target
+                .as_mapping_mut()
+                .expect("target mapping checked above");
+            let override_map = overrides
+                .as_mapping()
+                .expect("override mapping checked above");
+
+            for (key_value, override_value) in override_map {
+                let Some(key) = key_value.as_str() else {
+                    continue;
+                };
                 let mut child_path = path.to_vec();
-                child_path.push(key.clone());
+                child_path.push(key.to_string());
 
                 match target_map.get_mut(key) {
-                    Some(existing) if existing.is_object() && override_value.is_object() => {
+                    Some(existing) if existing.is_mapping() && override_value.is_mapping() => {
                         apply_overrides(
                             existing,
                             override_value,
@@ -1091,7 +1107,7 @@ fn apply_overrides(
                         );
                     }
                     None => {
-                        target_map.insert(key.clone(), override_value.clone());
+                        target_map.insert(key_value.clone(), override_value.clone());
                         record_generated_paths(
                             &child_path,
                             override_value,
@@ -1149,15 +1165,21 @@ fn remove_values_matching(
     path: &[String],
     options: &DeflateOptions,
 ) {
-    let (Value::Object(target_map), Value::Object(template_map)) = (target, template) else {
+    let Some(target_map) = target.as_mapping_mut() else {
+        return;
+    };
+    let Some(template_map) = template.as_mapping() else {
         return;
     };
 
     let mut remove_keys = Vec::new();
 
-    for (key, template_value) in template_map {
+    for (key_value, template_value) in template_map {
+        let Some(key) = key_value.as_str() else {
+            continue;
+        };
         let mut child_path = path.to_vec();
-        child_path.push(key.clone());
+        child_path.push(key.to_string());
 
         let Some(existing) = target_map.get_mut(key) else {
             continue;
@@ -1165,21 +1187,23 @@ fn remove_values_matching(
 
         if existing == template_value {
             if !options.protects(&child_path) {
-                remove_keys.push(key.clone());
+                remove_keys.push(key.to_string());
             }
-        } else if existing.is_object() && template_value.is_object() {
+        } else if existing.is_mapping() && template_value.is_mapping() {
             remove_values_matching(existing, template_value, &child_path, options);
 
-            if existing.as_object().is_some_and(|object| object.is_empty())
+            if existing
+                .as_mapping()
+                .is_some_and(|mapping| mapping.is_empty())
                 && !options.protects(&child_path)
             {
-                remove_keys.push(key.clone());
+                remove_keys.push(key.to_string());
             }
         }
     }
 
     for key in remove_keys {
-        target_map.remove(&key);
+        target_map.shift_remove(key);
     }
 }
 
@@ -1257,15 +1281,19 @@ fn remove_at_path(value: &mut Value, path: &[String]) -> Option<Value> {
     let (last, parent_path) = path.split_last()?;
     let parent = get_mut_at_path(value, parent_path)?;
 
-    match parent {
-        Value::Object(map) => map.remove(last),
-        Value::Array(items) => last
+    if let Some(map) = parent.as_mapping_mut() {
+        return map.shift_remove(last);
+    }
+
+    if let Some(items) = parent.as_sequence_mut() {
+        return last
             .parse::<usize>()
             .ok()
             .filter(|index| *index < items.len())
-            .map(|index| items.remove(index)),
-        _ => None,
+            .map(|index| items.remove(index));
     }
+
+    None
 }
 
 fn record_provenance(
@@ -1373,13 +1401,16 @@ fn record_generated_paths(
         },
     );
 
-    if let Value::Object(map) = value {
+    if let Some(map) = value.as_mapping() {
         for (child_key, child_value) in map {
+            let Some(child_key) = child_key.as_str() else {
+                continue;
+            };
             let mut child_path = path.to_vec();
-            child_path.push(child_key.clone());
+            child_path.push(child_key.to_string());
             record_generated_paths(&child_path, child_value, provenance, context);
         }
-    } else if let Value::Array(items) = value {
+    } else if let Some(items) = value.as_sequence() {
         for (index, child_value) in items.iter().enumerate() {
             let mut child_path = path.to_vec();
             child_path.push(index.to_string());
@@ -1584,14 +1615,19 @@ fn collect_matching_paths(
             }
         }
         Segment::Wildcard => match value {
-            Value::Object(map) => {
+            _ if value.is_mapping() => {
+                let map = value.as_mapping().expect("mapping checked above");
                 for (key, child) in map {
+                    let Some(key) = key.as_str() else {
+                        continue;
+                    };
                     let mut child_path = current_path.clone();
-                    child_path.push(key.clone());
+                    child_path.push(key.to_string());
                     collect_matching_paths(child, tail, child_path, output);
                 }
             }
-            Value::Array(items) => {
+            _ if value.is_sequence() => {
+                let items = value.as_sequence().expect("sequence checked above");
                 for (index, child) in items.iter().enumerate() {
                     let mut child_path = current_path.clone();
                     child_path.push(index.to_string());
@@ -1604,22 +1640,35 @@ fn collect_matching_paths(
 }
 
 fn value_child<'a>(value: &'a Value, key: &str) -> Option<&'a Value> {
-    match value {
-        Value::Object(map) => map.get(key),
-        Value::Array(items) => key.parse::<usize>().ok().and_then(|index| items.get(index)),
-        _ => None,
+    if let Some(map) = value.as_mapping() {
+        return map.get(key);
     }
+
+    if let Some(items) = value.as_sequence() {
+        return key.parse::<usize>().ok().and_then(|index| items.get(index));
+    }
+
+    None
 }
 
 fn value_child_mut<'a>(value: &'a mut Value, key: &str) -> Option<&'a mut Value> {
-    match value {
-        Value::Object(map) => map.get_mut(key),
-        Value::Array(items) => key
-            .parse::<usize>()
-            .ok()
-            .and_then(|index| items.get_mut(index)),
-        _ => None,
+    if value.is_mapping() {
+        return value
+            .as_mapping_mut()
+            .expect("mapping checked above")
+            .get_mut(key);
     }
+
+    if value.is_sequence() {
+        return key.parse::<usize>().ok().and_then(|index| {
+            value
+                .as_sequence_mut()
+                .expect("sequence checked above")
+                .get_mut(index)
+        });
+    }
+
+    None
 }
 
 fn parse_path(path: &str) -> Result<Vec<Segment>> {
@@ -1863,9 +1912,17 @@ fn format_docs(docs: &[Value], format: OutputFormat) -> Result<String> {
 fn format_inline(value: &Value) -> String {
     match value {
         Value::String(value) => format!("{value:?}"),
-        Value::Object(_) | Value::Array(_) => serde_json::to_string(value).unwrap_or_default(),
-        _ => value.to_string(),
+        value if value.is_mapping() || value.is_sequence() => {
+            serde_json::to_string(value).unwrap_or_default()
+        }
+        _ => format_yaml_inline(value),
     }
+}
+
+fn format_yaml_inline(value: &Value) -> String {
+    serde_yml::to_string(value)
+        .map(|rendered| rendered.trim().trim_start_matches("---").trim().to_string())
+        .unwrap_or_default()
 }
 
 fn human_path(path: &[String]) -> String {
@@ -1897,8 +1954,13 @@ fn json_pointer(path: &[String]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    macro_rules! json {
+        ($($json:tt)+) => {
+            serde_yml::to_value(serde_json::json!($($json)+)).unwrap()
+        };
+    }
 
     fn rules() -> RuleFile {
         serde_yml::from_str(
@@ -2321,6 +2383,85 @@ rules:
 
         assert_eq!(docs[0]["first"]["bottom"], json!("z"));
         fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn yaml_custom_tags_parse_and_render() {
+        let path = temp_input_path("custom-tags").with_extension("yaml");
+        fs::write(
+            &path,
+            r#"
+flow_authentication: !Find [authentik_flows.flow, [slug, default-authentication-flow]]
+fields:
+  - !KeyOf prompt-field-username
+"#,
+        )
+        .unwrap();
+
+        let docs = read_input(&path).unwrap();
+        let rendered = format_docs(&docs, OutputFormat::Yaml).unwrap();
+
+        assert!(rendered.contains("!Find"));
+        assert!(rendered.contains("!KeyOf"));
+        fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn inflate_preserves_yaml_custom_tags() {
+        let rule_file: RuleFile = serde_yml::from_str(
+            r#"
+rules:
+  - name: blueprint-defaults
+    match: "$"
+    defaults:
+      enabled: true
+"#,
+        )
+        .unwrap();
+        let mut docs = vec![
+            serde_yml::from_str(
+                r#"
+flow_authentication: !Find [authentik_flows.flow, [slug, default-authentication-flow]]
+"#,
+            )
+            .unwrap(),
+        ];
+        let mut provenance = HashMap::new();
+
+        inflate(&mut docs, &rule_file, &mut provenance).unwrap();
+
+        let rendered = format_docs(&docs, OutputFormat::Yaml).unwrap();
+        assert!(rendered.contains("!Find"));
+        assert!(rendered.contains("enabled: true"));
+    }
+
+    #[test]
+    fn deflate_preserves_yaml_custom_tags() {
+        let rule_file: RuleFile = serde_yml::from_str(
+            r#"
+rules:
+  - name: blueprint-defaults
+    match: "$"
+    defaults:
+      enabled: true
+"#,
+        )
+        .unwrap();
+        let mut docs = vec![
+            serde_yml::from_str(
+                r#"
+enabled: true
+flow_authentication: !Find [authentik_flows.flow, [slug, default-authentication-flow]]
+"#,
+            )
+            .unwrap(),
+        ];
+
+        deflate_with_options(&mut docs, &rule_file, &DeflateOptions::default()).unwrap();
+
+        let rendered = format_docs(&docs, OutputFormat::Yaml).unwrap();
+        assert!(!rendered.contains("enabled: true"));
+        assert!(rendered.contains("!Find"));
     }
 
     #[test]

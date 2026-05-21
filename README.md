@@ -201,8 +201,8 @@ Jsonnet, CUE, Kustomize, Helm, ytt, and kpt.
 - YAML comments and original formatting are intentionally not preserved in v1;
   output is normalized. Format-preserving output is tracked as a later
   enhancement in issue #2.
-- YAML custom tags are not supported yet; issue #3 tracks whether to support
-  or explicitly document them.
+- YAML custom tags are parsed and emitted for YAML output, but formatting around
+  tagged values is still normalized with the rest of the document.
 - Path syntax does not support filters.
 - `deflate` removes values that equal defaults, which is useful for compression
   but loses whether the value was intentionally authored.
