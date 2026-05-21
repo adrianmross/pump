@@ -1,0 +1,20 @@
+rules:
+  - name: deployment-platform-defaults
+    match: "$.spec.template.spec"
+    defaults:
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+  - name: deployment-replica-default
+    match: "$.spec"
+    defaults:
+      replicas: 2
+  - name: container-runtime-defaults
+    match: "$.spec.template.spec.containers.*"
+    defaults:
+      imagePullPolicy: IfNotPresent
+      resources:
+        requests:
+          cpu: 100m
+          memory: 128Mi

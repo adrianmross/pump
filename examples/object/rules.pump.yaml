@@ -1,0 +1,7 @@
+rules:
+  - name: default-item-shape
+    match: "$.*"
+    defaults:
+      top: a
+      middle: 5
+      bottom: z

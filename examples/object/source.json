@@ -1,0 +1,15 @@
+{
+  "first": {
+    "top": "a",
+    "middle": 5
+  },
+  "second": {
+    "top": "b",
+    "middle": 5,
+    "very-bottom": 0
+  },
+  "third": {
+    "top": "a",
+    "middle": 10
+  }
+}
