@@ -104,6 +104,19 @@ enum Commands {
 
         #[arg(short, long, help = "Pump rule file")]
         rules: PathBuf,
+
+        #[arg(long, help = "Fail if applying rules would change the input")]
+        strict: bool,
+
+        #[arg(
+            long,
+            visible_alias = "fix",
+            help = "Write the inflated output back to the input file"
+        )]
+        write: bool,
+
+        #[arg(long, value_enum, help = "Force output format")]
+        format: Option<OutputFormat>,
     },
 }
 
@@ -277,16 +290,16 @@ fn main() -> Result<()> {
             let after = format_docs(&docs, output_format(&input, None, format))?;
             print_diff(&before, &after, "inflated");
         }
-        Commands::Check { input, rules } => {
+        Commands::Check {
+            input,
+            rules,
+            strict,
+            write,
+            format,
+        } => {
             let mut docs = read_input(&input)?;
             let rule_file = read_rules(&rules)?;
-            let mut provenance = HashMap::new();
-            inflate(&mut docs, &rule_file, &mut provenance)?;
-            println!(
-                "ok: {} document(s), {} rule(s)",
-                docs.len(),
-                rule_file.rules.len()
-            );
+            check(&input, &rule_file, &mut docs, strict, write, format)?;
         }
     }
 
@@ -470,6 +483,56 @@ fn deflate_with_options(
             }
         }
     }
+
+    Ok(())
+}
+
+fn check(
+    input_path: &Path,
+    rule_file: &RuleFile,
+    docs: &mut [Value],
+    strict: bool,
+    write: bool,
+    format: Option<OutputFormat>,
+) -> Result<()> {
+    let output_format = output_format(input_path, Some(input_path), format);
+    let before = (strict || write)
+        .then(|| format_docs(docs, output_format))
+        .transpose()?;
+    let mut provenance = HashMap::new();
+
+    inflate(docs, rule_file, &mut provenance)?;
+
+    if write {
+        write_output(docs, input_path, Some(input_path), format)?;
+        println!(
+            "wrote: {} document(s), {} rule(s), {} generated value(s)",
+            docs.len(),
+            rule_file.rules.len(),
+            provenance.len()
+        );
+        return Ok(());
+    }
+
+    if strict {
+        let before = before.expect("strict check should capture input before inflate");
+        let after = format_docs(docs, output_format)?;
+
+        if before != after {
+            print_diff(&before, &after, "inflated");
+            bail!(
+                "strict check failed: applying rules would change {}",
+                input_path.display()
+            );
+        }
+    }
+
+    println!(
+        "ok: {} document(s), {} rule(s), {} generated value(s)",
+        docs.len(),
+        rule_file.rules.len(),
+        provenance.len()
+    );
 
     Ok(())
 }
@@ -1466,6 +1529,86 @@ rules:
         deflate_with_options(&mut docs, &rule_file, &options).unwrap();
 
         assert_eq!(docs[0]["app"], json!({"replicas": 2}));
+    }
+
+    #[test]
+    fn strict_check_passes_when_input_is_already_inflated() {
+        let mut docs = vec![json!({
+            "first": {
+                "top": "a",
+                "middle": 5,
+                "bottom": "z"
+            }
+        })];
+        let rule_file: RuleFile = serde_yml::from_str(
+            r#"
+rules:
+  - name: default-item-shape
+    match: "$.*"
+    defaults:
+      top: a
+      middle: 5
+      bottom: z
+"#,
+        )
+        .unwrap();
+
+        check(
+            Path::new("source.json"),
+            &rule_file,
+            &mut docs,
+            true,
+            false,
+            Some(OutputFormat::Json),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn strict_check_fails_when_rules_would_change_input() {
+        let mut docs = vec![json!({
+            "first": {
+                "top": "a",
+                "middle": 5
+            }
+        })];
+
+        let err = check(
+            Path::new("source.json"),
+            &rules(),
+            &mut docs,
+            true,
+            false,
+            Some(OutputFormat::Json),
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("strict check failed"));
+    }
+
+    #[test]
+    fn write_check_inflates_docs_in_place() {
+        let path =
+            std::env::temp_dir().join(format!("pump-write-check-{}.json", std::process::id()));
+        let mut docs = vec![json!({
+            "first": {
+                "top": "a",
+                "middle": 5
+            }
+        })];
+
+        check(
+            &path,
+            &rules(),
+            &mut docs,
+            false,
+            true,
+            Some(OutputFormat::Json),
+        )
+        .unwrap();
+
+        assert_eq!(docs[0]["first"]["bottom"], json!("z"));
+        fs::remove_file(path).ok();
     }
 
     #[test]

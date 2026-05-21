@@ -43,6 +43,8 @@ pump deflate rendered.yaml --rules platform.pump.yaml --out app.yaml
 pump explain app.yaml --rules platform.pump.yaml --path '$.spec.template.spec.securityContext'
 pump diff app.yaml --rules platform.pump.yaml
 pump check app.yaml --rules platform.pump.yaml
+pump check rendered.yaml --rules platform.pump.yaml --strict
+pump check app.yaml --rules platform.pump.yaml --write
 ```
 
 Short aliases may be useful once the semantics are stable:
@@ -123,6 +125,21 @@ Kubernetes-style YAML stream:
 cargo run -- inflate examples/kubernetes/source.yaml --rules examples/kubernetes/rules.pump.yaml
 cargo run -- explain examples/kubernetes/source.yaml --rules examples/kubernetes/rules.pump.yaml --path '$.spec.template.spec.containers.*.resources.requests.cpu'
 ```
+
+Biome-style checking:
+
+```sh
+pump check app.yaml --rules platform.pump.yaml
+pump check rendered.yaml --rules platform.pump.yaml --strict
+pump check app.yaml --rules platform.pump.yaml --write
+pump check app.yaml --rules platform.pump.yaml --fix
+```
+
+- `check` validates that input and rules can be inflated.
+- `check --strict` fails with a diff if applying the rules would change the
+  file.
+- `check --write` inflates the file in place.
+- `check --fix` is an alias for `--write`.
 
 To refresh the README terminal demo after CLI semantics settle:
 
