@@ -1,0 +1,94 @@
+# cargo-dist release scaffold. Keep this tag/manual driven until release policy
+# is explicitly enabled.
+name: Release
+
+on:
+  push:
+    tags:
+      - "__disabled-v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to release"
+        required: true
+
+permissions:
+  contents: write
+  id-token: write
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Checkout requested tag
+        if: github.event_name == 'workflow_dispatch'
+        shell: bash
+        run: |
+          git fetch --tags --force
+          git checkout "${{ github.event.inputs.tag }}"
+
+      - name: Install cargo-dist
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-dist@0.31.0
+
+      - name: Plan release
+        id: plan
+        run: dist plan --tag "$RELEASE_TAG" --output-format=json > dist-manifest.json
+        env:
+          RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.ref_name }}
+
+      - name: Upload manifest
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-manifest
+          path: dist-manifest.json
+
+  build-local-artifacts:
+    needs: plan
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: macos-13
+            target: x86_64-apple-darwin
+          - os: macos-14
+            target: aarch64-apple-darwin
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Checkout requested tag
+        if: github.event_name == 'workflow_dispatch'
+        shell: bash
+        run: |
+          git fetch --tags --force
+          git checkout "${{ github.event.inputs.tag }}"
+
+      - name: Install cargo-dist
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-dist@0.31.0
+
+      - name: Build artifacts
+        run: dist build --artifacts=local --target ${{ matrix.target }} --tag "$RELEASE_TAG"
+        env:
+          RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.ref_name }}
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: artifacts-${{ matrix.target }}
+          path: target/distrib/*

@@ -3,6 +3,8 @@
 Pump is an experiment in sparse config hydration for GitOps and declarative
 configuration.
 
+![Pump terminal demo](docs/assets/pump-demo.gif)
+
 The core workflow is:
 
 ```text
@@ -19,6 +21,11 @@ and every generated field should be explainable.
 ```sh
 cargo install --path .
 ```
+
+Release artifacts and Homebrew packaging are scaffolded with `cargo-dist`, but
+not published by default. See [release notes](docs/release/release.md) and
+[Homebrew notes](docs/release/homebrew.md) before enabling any remote release
+pipeline.
 
 For local development:
 
@@ -50,7 +57,8 @@ modes, because subcommands are easier to read in CI logs and GitOps reviews.
 
 ## Rule format
 
-Pump v1 supports rule files with ordered `defaults` rules:
+Pump v1 supports ordered rules. Rules run top-to-bottom, so later rules can
+override earlier generated values.
 
 ```yaml
 rules:
@@ -70,8 +78,34 @@ The `match` path syntax is intentionally small:
 - `*` targets all object children or array items, such as
   `$.spec.template.spec.containers.*`.
 
-Defaults deep-merge into matched objects. Authored values win, and missing
-fields are generated.
+Supported operations:
+
+- `defaults`: deep-merge missing fields. Authored values win.
+- `overrides`: deep-merge and force values even when authored.
+- `delete`: remove relative or absolute paths from each match.
+- `replace`: replace the whole matched value. It cannot be combined with other
+  operations in the same rule.
+
+Rules can be limited to Kubernetes-style documents:
+
+```yaml
+rules:
+  - name: deployment-runtime-defaults
+    match: "$.spec.template.spec.containers.*"
+    apiVersion: apps/v1
+    kind: Deployment
+    metadataName: billing-api
+    defaults:
+      imagePullPolicy: IfNotPresent
+```
+
+Path syntax:
+
+- `$` targets the document root.
+- `$.field.nested` targets object fields.
+- `$.metadata.labels.app\\.kubernetes\\.io/name` escapes dots in keys.
+- `/spec/template/spec` uses JSON Pointer.
+- `*` targets all object children or array items.
 
 ## Examples
 
@@ -89,6 +123,29 @@ Kubernetes-style YAML stream:
 cargo run -- inflate examples/kubernetes/source.yaml --rules examples/kubernetes/rules.pump.yaml
 cargo run -- explain examples/kubernetes/source.yaml --rules examples/kubernetes/rules.pump.yaml --path '$.spec.template.spec.containers.*.resources.requests.cpu'
 ```
+
+To refresh the README terminal demo after CLI semantics settle:
+
+```sh
+make demo
+```
+
+The demo recipe expects [`vhs`](https://github.com/charmbracelet/vhs) to be
+installed and writes `docs/assets/pump-demo.gif`.
+
+## Development
+
+```sh
+make fmt
+make lint
+make test
+make build
+make dist-plan
+```
+
+The CI scaffold runs the same Rust checks on pull requests and `main`. Release
+workflows are tag/manual driven and use `cargo-dist`; nothing should publish on
+merge.
 
 ## Product constraints
 
@@ -109,8 +166,6 @@ cargo run -- explain examples/kubernetes/source.yaml --rules examples/kubernetes
 ## Current limitations
 
 - YAML comments and original formatting are not preserved.
-- Path syntax does not support escaping, filters, or predicates.
+- Path syntax does not support filters.
 - `deflate` removes values that equal defaults, which is useful for compression
   but loses whether the value was intentionally authored.
-- Rule files currently support `defaults`; explicit overrides and deletes are
-  not implemented yet.
