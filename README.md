@@ -25,7 +25,9 @@ cargo install --path .
 Release artifacts and Homebrew packaging are scaffolded with `cargo-dist`, but
 not published by default. See [release notes](docs/release/release.md) and
 [Homebrew notes](docs/release/homebrew.md) before enabling any remote release
-pipeline.
+pipeline. Use the
+[public release checklist](docs/release/public-release-checklist.md) before
+changing repository visibility or running a public release.
 
 For local development:
 

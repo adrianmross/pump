@@ -5,6 +5,9 @@ Pump uses `cargo-dist` as the Rust-native release system.
 The release setup is intentionally staged but not published by default. Keep it
 local/manual until the release policy is settled.
 
+Use the [public release checklist](public-release-checklist.md) as the gate
+before changing repository visibility or running a public release path.
+
 ## Current Contract
 
 - Normal CI runs Rust formatting, Clippy, tests, and a release build.
