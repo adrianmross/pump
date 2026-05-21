@@ -15,7 +15,7 @@ to learn a programming or packaging model.
 | [Kustomize](https://kubernetes.io/docs/tasks/manage-kubernetes-objects/kustomization/) | Kubernetes-native bases, overlays, patches, generators, and composition without templates. | Pump is not an overlay engine. Its value is compressing repeated object shape and then checking that inflated YAML is current. It can run before or after Kustomize if both stages are made explicit. |
 | [Helm](https://helm.sh/docs/) | Kubernetes application packaging, charts, release metadata, values, hooks, and templating. | Pump is not a package manager and does not install releases. It can reduce repeated values in chart inputs or post-rendered manifests, but Helm should remain the chart distribution boundary. |
 | [ytt](https://carvel.dev/ytt/) | YAML templating, overlays, data values, schema, and Starlark-powered reuse. | ytt is much more expressive. Pump's tradeoff is lower authoring surface: rules say what fields to fill, override, delete, or replace; source files remain readable manifests. |
-| [kpt](https://kpt.dev/) | Package-centric Kubernetes configuration, KRM functions, validation, and mutation pipelines. | Pump fits naturally as a small KRM-style function later: inflate before validation or deflate before review. The distinctive behavior is reversible sparse/inflated workflows with field provenance. |
+| [kpt](https://kpt.dev/) | Package-centric Kubernetes configuration, KRM functions, validation, and mutation pipelines. | Pump fits naturally as a small KRM-style function later, but that is deferred until the CLI has more real-manifest validation. Issue #1 tracks this future wrapper. |
 
 ## Positioning
 
