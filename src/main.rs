@@ -7,6 +7,10 @@ use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand, ValueEnum};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use serde_yml::{
+    de::{Event, Progress},
+    loader::Loader,
+};
 use similar::TextDiff;
 
 #[derive(Parser)]
@@ -140,6 +144,16 @@ enum OutputFormat {
 #[derive(Debug, Deserialize)]
 struct RuleFile {
     rules: Vec<Rule>,
+
+    #[serde(skip)]
+    source_locations: RuleSourceIndex,
+}
+
+impl RuleFile {
+    fn operation_location(&self, rule_index: usize, operation: &str) -> Option<&SourceLocation> {
+        self.source_locations
+            .get(&operation_key(rule_index, operation))
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -178,9 +192,21 @@ struct ProvenanceEntry {
     rule: String,
     operation: String,
     reason: String,
+    #[serde(rename = "operationLocation", skip_serializing_if = "Option::is_none")]
+    operation_location: Option<SourceLocation>,
 }
 
 type Provenance = HashMap<String, ProvenanceEntry>;
+type RuleSourceIndex = HashMap<String, SourceLocation>;
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+struct SourceLocation {
+    file: String,
+    line: u64,
+    column: u64,
+    #[serde(rename = "byteIndex")]
+    byte_index: u64,
+}
 
 #[derive(Debug, Clone, Serialize)]
 struct RuleTrace {
@@ -202,6 +228,8 @@ struct OperationTrace {
     reason: String,
     before: Option<Value>,
     after: Option<Value>,
+    #[serde(rename = "operationLocation", skip_serializing_if = "Option::is_none")]
+    operation_location: Option<SourceLocation>,
 }
 
 #[derive(Debug)]
@@ -209,6 +237,43 @@ struct CheckResult {
     documents: usize,
     generated: usize,
     changed: bool,
+}
+
+struct OperationContext<'location, 'operations> {
+    location: Option<&'location SourceLocation>,
+    operations: Option<&'operations mut Vec<OperationTrace>>,
+}
+
+impl OperationContext<'_, '_> {
+    fn push(
+        &mut self,
+        operation: &str,
+        path: &[String],
+        outcome: &str,
+        reason: &str,
+        before: Option<Value>,
+        after: Option<Value>,
+    ) {
+        if let Some(operations) = self.operations.as_deref_mut() {
+            operations.push(OperationTrace {
+                operation: operation.to_string(),
+                path: json_pointer(path),
+                outcome: outcome.to_string(),
+                reason: reason.to_string(),
+                before,
+                after,
+                operation_location: self.location.cloned(),
+            });
+        }
+    }
+}
+
+struct ProvenanceContext<'a> {
+    doc_index: usize,
+    rule_name: &'a str,
+    operation: &'a str,
+    reason: &'a str,
+    operation_location: Option<&'a SourceLocation>,
 }
 
 #[derive(Debug, Serialize)]
@@ -232,6 +297,8 @@ struct ExplainSource {
     rule: Option<String>,
     operation: Option<String>,
     reason: String,
+    #[serde(rename = "operationLocation", skip_serializing_if = "Option::is_none")]
+    operation_location: Option<SourceLocation>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -376,16 +443,149 @@ fn read_input(path: &Path) -> Result<Vec<Value>> {
 fn read_rules(path: &Path) -> Result<RuleFile> {
     let input = fs::read_to_string(path)
         .with_context(|| format!("failed to read rules {}", path.display()))?;
-    let rules: RuleFile = serde_yml::from_str(&input)
+    let mut rules: RuleFile = serde_yml::from_str(&input)
         .with_context(|| format!("failed to parse rules {}", path.display()))?;
 
     if rules.rules.is_empty() {
         bail!("{} did not define any rules", path.display());
     }
 
+    rules.source_locations = rule_source_locations(path, &input)
+        .with_context(|| format!("failed to index rule source locations {}", path.display()))?;
+
     validate_rules(&rules)?;
 
     Ok(rules)
+}
+
+fn rule_source_locations(path: &Path, input: &str) -> Result<RuleSourceIndex> {
+    let mut loader = Loader::new(Progress::Str(input))?;
+    let Some(document) = loader.next_document() else {
+        return Ok(HashMap::new());
+    };
+
+    if let Some(error) = document.error {
+        bail!("failed to parse rule source locations: {}", error);
+    }
+
+    let mut index = HashMap::new();
+    let mut position = 0;
+    collect_rule_source_locations(
+        &document.events,
+        &mut position,
+        Vec::new(),
+        path,
+        &mut index,
+    )?;
+
+    Ok(index)
+}
+
+fn collect_rule_source_locations(
+    events: &[(Event<'_>, serde_yml::libyml::error::Mark)],
+    position: &mut usize,
+    path: Vec<String>,
+    file: &Path,
+    index: &mut RuleSourceIndex,
+) -> Result<()> {
+    let Some((event, _mark)) = events.get(*position) else {
+        return Ok(());
+    };
+
+    match event {
+        Event::MappingStart(_) => {
+            *position += 1;
+            while let Some((event, mark)) = events.get(*position) {
+                if matches!(event, Event::MappingEnd) {
+                    *position += 1;
+                    break;
+                }
+
+                let Some(key) = scalar_event_text(event) else {
+                    bail!("expected scalar mapping key while indexing rule locations");
+                };
+                *position += 1;
+
+                let mut child_path = path.clone();
+                child_path.push(key.clone());
+                record_rule_operation_location(&child_path, file, *mark, index);
+                collect_rule_source_locations(events, position, child_path, file, index)?;
+            }
+        }
+        Event::SequenceStart(_) => {
+            *position += 1;
+            let mut item_index = 0;
+            while let Some((event, _mark)) = events.get(*position) {
+                if matches!(event, Event::SequenceEnd) {
+                    *position += 1;
+                    break;
+                }
+
+                let mut child_path = path.clone();
+                child_path.push(item_index.to_string());
+                collect_rule_source_locations(events, position, child_path, file, index)?;
+                item_index += 1;
+            }
+        }
+        Event::Alias(_) | Event::Scalar(_) | Event::Void => {
+            *position += 1;
+        }
+        Event::MappingEnd | Event::SequenceEnd => {}
+    }
+
+    Ok(())
+}
+
+fn record_rule_operation_location(
+    path: &[String],
+    file: &Path,
+    mark: serde_yml::libyml::error::Mark,
+    index: &mut RuleSourceIndex,
+) {
+    let [root, rule_index, operation] = path else {
+        return;
+    };
+
+    if root != "rules"
+        || !matches!(
+            operation.as_str(),
+            "defaults" | "overrides" | "delete" | "replace"
+        )
+    {
+        return;
+    }
+
+    let Ok(rule_index) = rule_index.parse::<usize>() else {
+        return;
+    };
+
+    index.insert(
+        operation_key(rule_index, operation),
+        SourceLocation {
+            file: file.display().to_string(),
+            line: mark.line() + 1,
+            column: mark.column() + 1,
+            byte_index: mark.index(),
+        },
+    );
+}
+
+fn scalar_event_text(event: &Event<'_>) -> Option<String> {
+    let Event::Scalar(scalar) = event else {
+        return None;
+    };
+
+    Some(String::from_utf8_lossy(&scalar.value).into_owned())
+}
+
+fn operation_key(rule_index: usize, operation: &str) -> String {
+    let operation = match operation {
+        "default" => "defaults",
+        "override" => "overrides",
+        other => other,
+    };
+
+    format!("{rule_index}:{operation}")
 }
 
 fn validate_rules(rule_file: &RuleFile) -> Result<()> {
@@ -431,6 +631,10 @@ fn inflate_with_traces(
     for (rule_index, rule) in rule_file.rules.iter().enumerate() {
         let segments = parse_path(&rule.match_path)
             .with_context(|| format!("invalid match path for rule {}", rule.name))?;
+        let default_location = rule_file.operation_location(rule_index, "default");
+        let override_location = rule_file.operation_location(rule_index, "override");
+        let delete_location = rule_file.operation_location(rule_index, "delete");
+        let replace_location = rule_file.operation_location(rule_index, "replace");
 
         for (doc_index, doc) in docs.iter_mut().enumerate() {
             let mut trace = RuleTrace {
@@ -473,13 +677,16 @@ fn inflate_with_traces(
                     let before = target.clone();
                     *target = replacement.clone();
                     record_generated_paths(
-                        doc_index,
                         &target_path,
                         replacement,
-                        &rule.name,
-                        "replace",
-                        "value replaced by rule",
                         provenance,
+                        &ProvenanceContext {
+                            doc_index,
+                            rule_name: &rule.name,
+                            operation: "replace",
+                            reason: "value replaced by rule",
+                            operation_location: replace_location,
+                        },
                     );
                     trace.operations.push(OperationTrace {
                         operation: "replace".to_string(),
@@ -488,6 +695,7 @@ fn inflate_with_traces(
                         reason: "value replaced by rule".to_string(),
                         before: Some(before),
                         after: Some(replacement.clone()),
+                        operation_location: replace_location.cloned(),
                     });
                     continue;
                 }
@@ -502,7 +710,10 @@ fn inflate_with_traces(
                         &target_path,
                         &rule.name,
                         provenance,
-                        Some(&mut trace.operations),
+                        OperationContext {
+                            location: default_location,
+                            operations: Some(&mut trace.operations),
+                        },
                     );
                 }
 
@@ -516,7 +727,10 @@ fn inflate_with_traces(
                         &target_path,
                         &rule.name,
                         provenance,
-                        Some(&mut trace.operations),
+                        OperationContext {
+                            location: override_location,
+                            operations: Some(&mut trace.operations),
+                        },
                     );
                 }
 
@@ -527,7 +741,10 @@ fn inflate_with_traces(
                     &rule.delete,
                     &rule.name,
                     provenance,
-                    Some(&mut trace.operations),
+                    OperationContext {
+                        location: delete_location,
+                        operations: Some(&mut trace.operations),
+                    },
                 )
                 .with_context(|| format!("invalid delete path for rule {}", rule.name))?;
             }
@@ -766,7 +983,7 @@ fn apply_defaults(
     path: &[String],
     rule_name: &str,
     provenance: &mut Provenance,
-    mut operations: Option<&mut Vec<OperationTrace>>,
+    mut context: OperationContext<'_, '_>,
 ) {
     let (Value::Object(target_map), Value::Object(default_map)) = (target, defaults) else {
         return;
@@ -785,31 +1002,35 @@ fn apply_defaults(
                     &child_path,
                     rule_name,
                     provenance,
-                    operations.as_deref_mut(),
+                    OperationContext {
+                        location: context.location,
+                        operations: context.operations.as_deref_mut(),
+                    },
                 );
             }
             Some(_) => {}
             None => {
                 target_map.insert(key.clone(), default_value.clone());
                 record_generated_paths(
-                    doc_index,
                     &child_path,
                     default_value,
-                    rule_name,
-                    "default",
-                    "field was missing in source",
                     provenance,
+                    &ProvenanceContext {
+                        doc_index,
+                        rule_name,
+                        operation: "default",
+                        reason: "field was missing in source",
+                        operation_location: context.location,
+                    },
                 );
-                if let Some(operations) = operations.as_deref_mut() {
-                    operations.push(OperationTrace {
-                        operation: "default".to_string(),
-                        path: json_pointer(&child_path),
-                        outcome: "generated".to_string(),
-                        reason: "field was missing in source".to_string(),
-                        before: None,
-                        after: Some(default_value.clone()),
-                    });
-                }
+                context.push(
+                    "default",
+                    &child_path,
+                    "generated",
+                    "field was missing in source",
+                    None,
+                    Some(default_value.clone()),
+                );
             }
         }
     }
@@ -822,7 +1043,7 @@ fn apply_overrides(
     path: &[String],
     rule_name: &str,
     provenance: &mut Provenance,
-    mut operations: Option<&mut Vec<OperationTrace>>,
+    mut context: OperationContext<'_, '_>,
 ) {
     match (target, overrides) {
         (Value::Object(target_map), Value::Object(override_map)) => {
@@ -839,53 +1060,58 @@ fn apply_overrides(
                             &child_path,
                             rule_name,
                             provenance,
-                            operations.as_deref_mut(),
+                            OperationContext {
+                                location: context.location,
+                                operations: context.operations.as_deref_mut(),
+                            },
                         );
                     }
                     Some(existing) => {
                         let before = existing.clone();
                         *existing = override_value.clone();
                         record_generated_paths(
-                            doc_index,
                             &child_path,
                             override_value,
-                            rule_name,
-                            "override",
-                            "value forced by rule",
                             provenance,
+                            &ProvenanceContext {
+                                doc_index,
+                                rule_name,
+                                operation: "override",
+                                reason: "value forced by rule",
+                                operation_location: context.location,
+                            },
                         );
-                        if let Some(operations) = operations.as_deref_mut() {
-                            operations.push(OperationTrace {
-                                operation: "override".to_string(),
-                                path: json_pointer(&child_path),
-                                outcome: "overwritten".to_string(),
-                                reason: "value forced by rule".to_string(),
-                                before: Some(before),
-                                after: Some(override_value.clone()),
-                            });
-                        }
+                        context.push(
+                            "override",
+                            &child_path,
+                            "overwritten",
+                            "value forced by rule",
+                            Some(before),
+                            Some(override_value.clone()),
+                        );
                     }
                     None => {
                         target_map.insert(key.clone(), override_value.clone());
                         record_generated_paths(
-                            doc_index,
                             &child_path,
                             override_value,
-                            rule_name,
-                            "override",
-                            "value forced by rule",
                             provenance,
+                            &ProvenanceContext {
+                                doc_index,
+                                rule_name,
+                                operation: "override",
+                                reason: "value forced by rule",
+                                operation_location: context.location,
+                            },
                         );
-                        if let Some(operations) = operations.as_deref_mut() {
-                            operations.push(OperationTrace {
-                                operation: "override".to_string(),
-                                path: json_pointer(&child_path),
-                                outcome: "generated".to_string(),
-                                reason: "value forced by rule".to_string(),
-                                before: None,
-                                after: Some(override_value.clone()),
-                            });
-                        }
+                        context.push(
+                            "override",
+                            &child_path,
+                            "generated",
+                            "value forced by rule",
+                            None,
+                            Some(override_value.clone()),
+                        );
                     }
                 }
             }
@@ -894,24 +1120,25 @@ fn apply_overrides(
             let before = target.clone();
             *target = overrides.clone();
             record_generated_paths(
-                doc_index,
                 path,
                 overrides,
-                rule_name,
-                "override",
-                "value forced by rule",
                 provenance,
+                &ProvenanceContext {
+                    doc_index,
+                    rule_name,
+                    operation: "override",
+                    reason: "value forced by rule",
+                    operation_location: context.location,
+                },
             );
-            if let Some(operations) = operations {
-                operations.push(OperationTrace {
-                    operation: "override".to_string(),
-                    path: json_pointer(path),
-                    outcome: "overwritten".to_string(),
-                    reason: "value forced by rule".to_string(),
-                    before: Some(before),
-                    after: Some(overrides.clone()),
-                });
-            }
+            context.push(
+                "override",
+                path,
+                "overwritten",
+                "value forced by rule",
+                Some(before),
+                Some(overrides.clone()),
+            );
         }
     }
 }
@@ -963,7 +1190,7 @@ fn apply_delete_paths(
     delete_paths: &[String],
     rule_name: &str,
     provenance: &mut Provenance,
-    mut operations: Option<&mut Vec<OperationTrace>>,
+    mut context: OperationContext<'_, '_>,
 ) -> Result<()> {
     for delete_path in delete_paths {
         let segments = parse_rule_path(delete_path, base_path)?;
@@ -982,18 +1209,17 @@ fn apply_delete_paths(
                 "delete",
                 "value removed by rule",
                 provenance,
+                context.location,
             );
             let before = remove_at_path(doc, &path);
-            if let Some(operations) = operations.as_deref_mut() {
-                operations.push(OperationTrace {
-                    operation: "delete".to_string(),
-                    path: json_pointer(&path),
-                    outcome: "deleted".to_string(),
-                    reason: "value removed by rule".to_string(),
-                    before,
-                    after: None,
-                });
-            }
+            context.push(
+                "delete",
+                &path,
+                "deleted",
+                "value removed by rule",
+                before,
+                None,
+            );
         }
     }
 
@@ -1049,6 +1275,7 @@ fn record_provenance(
     operation: &str,
     reason: &str,
     provenance: &mut Provenance,
+    operation_location: Option<&SourceLocation>,
 ) {
     provenance.insert(
         provenance_key(doc_index, path),
@@ -1058,6 +1285,7 @@ fn record_provenance(
             rule: rule_name.to_string(),
             operation: operation.to_string(),
             reason: reason.to_string(),
+            operation_location: operation_location.cloned(),
         },
     );
 }
@@ -1127,23 +1355,21 @@ fn paths_overlap(protected: &[Segment], path: &[String]) -> bool {
 }
 
 fn record_generated_paths(
-    doc_index: usize,
     path: &[String],
     value: &Value,
-    rule_name: &str,
-    operation: &str,
-    reason: &str,
     provenance: &mut Provenance,
+    context: &ProvenanceContext<'_>,
 ) {
-    let key = provenance_key(doc_index, path);
+    let key = provenance_key(context.doc_index, path);
     provenance.insert(
         key,
         ProvenanceEntry {
-            doc: doc_index,
+            doc: context.doc_index,
             path: json_pointer(path),
-            rule: rule_name.to_string(),
-            operation: operation.to_string(),
-            reason: reason.to_string(),
+            rule: context.rule_name.to_string(),
+            operation: context.operation.to_string(),
+            reason: context.reason.to_string(),
+            operation_location: context.operation_location.cloned(),
         },
     );
 
@@ -1151,29 +1377,13 @@ fn record_generated_paths(
         for (child_key, child_value) in map {
             let mut child_path = path.to_vec();
             child_path.push(child_key.clone());
-            record_generated_paths(
-                doc_index,
-                &child_path,
-                child_value,
-                rule_name,
-                operation,
-                reason,
-                provenance,
-            );
+            record_generated_paths(&child_path, child_value, provenance, context);
         }
     } else if let Value::Array(items) = value {
         for (index, child_value) in items.iter().enumerate() {
             let mut child_path = path.to_vec();
             child_path.push(index.to_string());
-            record_generated_paths(
-                doc_index,
-                &child_path,
-                child_value,
-                rule_name,
-                operation,
-                reason,
-                provenance,
-            );
+            record_generated_paths(&child_path, child_value, provenance, context);
         }
     }
 }
@@ -1212,12 +1422,14 @@ fn explain(
                             rule: None,
                             operation: None,
                             reason: "authored value or existing container".to_string(),
+                            operation_location: None,
                         },
                         |source| ExplainSource {
                             source_type: "rule".to_string(),
                             rule: Some(source.rule.clone()),
                             operation: Some(source.operation.clone()),
                             reason: source.reason.clone(),
+                            operation_location: source.operation_location.clone(),
                         },
                     ),
                 });
@@ -1236,6 +1448,9 @@ fn explain(
                 println!("source: rule {}", source.rule);
                 println!("operation: {}", source.operation);
                 println!("reason: {}", source.reason);
+                if let Some(location) = &source.operation_location {
+                    println!("location: {}", format_location(location));
+                }
             } else {
                 println!("source: input");
                 println!("reason: authored value or existing container");
@@ -1307,16 +1522,26 @@ fn print_trace(traces: &[RuleTrace]) {
         }
 
         for operation in related_operations {
+            let location = operation
+                .operation_location
+                .as_ref()
+                .map(|location| format!(" at {}", format_location(location)))
+                .unwrap_or_default();
             println!(
-                "- {}: {} {} {} ({})",
+                "- {}: {} {} {} ({}){}",
                 trace.rule,
                 operation.operation,
                 operation.path,
                 operation.outcome,
-                operation.reason
+                operation.reason,
+                location
             );
         }
     }
+}
+
+fn format_location(location: &SourceLocation) -> String {
+    format!("{}:{}:{}", location.file, location.line, location.column)
 }
 
 fn paths_are_related(left: &str, right: &str) -> bool {
@@ -1876,6 +2101,39 @@ rules:
         assert_eq!(related[0].rule, "deployment-defaults");
         assert_eq!(related[0].operations.len(), 1);
         assert_eq!(all.len(), 2);
+    }
+
+    #[test]
+    fn rule_source_locations_index_operation_keys() {
+        let source = r#"rules:
+  - name: base
+    match: "$.app"
+    defaults:
+      mode: safe
+    overrides:
+      tier: prod
+    delete:
+      - debug
+  - name: replace-block
+    match: "$.app.legacy"
+    replace:
+      enabled: false
+"#;
+
+        let index = rule_source_locations(Path::new("rules.pump.yaml"), source).unwrap();
+
+        assert_eq!(
+            index.get(&operation_key(0, "default")).unwrap(),
+            &SourceLocation {
+                file: "rules.pump.yaml".to_string(),
+                line: 4,
+                column: 5,
+                byte_index: 45,
+            }
+        );
+        assert_eq!(index.get(&operation_key(0, "override")).unwrap().line, 6);
+        assert_eq!(index.get(&operation_key(0, "delete")).unwrap().line, 8);
+        assert_eq!(index.get(&operation_key(1, "replace")).unwrap().line, 12);
     }
 
     #[test]

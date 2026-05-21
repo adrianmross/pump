@@ -150,7 +150,8 @@ pump check app.yaml --rules platform.pump.yaml --fix
 
 `explain` also prints the rule operations related to the inspected path. Add
 `--all` to include the full rule trace for the document, including skipped and
-unchanged rules. Use `--json` when that trace needs to feed another tool.
+unchanged rules. Generated values include operation-level rule locations when
+available. Use `--json` when that trace needs to feed another tool.
 
 To refresh the README terminal demo after CLI semantics settle:
 

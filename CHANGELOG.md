@@ -13,6 +13,8 @@
   execution traces in `explain`.
 - Default `explain` traces to operations related to the inspected path, with
   `--all` for the full document rule trace.
+- Add operation-level source locations to generated-field provenance and
+  explain traces.
 - Support multi-file `check`, including strict drift detection and in-place
   `--write` / `--fix` enforcement across multiple inputs.
 - Add a richer Kubernetes/GitOps example and adjacent-tool positioning notes.

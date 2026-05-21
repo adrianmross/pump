@@ -9,7 +9,7 @@ Pump's provenance model has two jobs:
 
 `inflate --provenance-out` writes machine-readable generated-field provenance.
 Each entry records the document index, JSON Pointer path, rule name, operation,
-and reason.
+reason, and operation-level rule location when the rule file can be indexed.
 
 `explain` inflates the input, prints the final value for the requested path, and
 reports whether the value came from input or a rule. By default it prints only
@@ -36,23 +36,21 @@ pump explain app.yaml --rules platform.pump.yaml \
 
 ## Source Locations
 
-Rule file line/column locations are not attached yet.
+Pump keeps `serde_yml` as the YAML parser and adds a second source-index pass
+over `serde_yml::loader::Loader`. Its parsed document events carry marks with
+byte index, line, and column. That avoids adding a second YAML parser only for
+spans.
 
-The likely v1 path is to keep `serde_yml` as the YAML parser and add a second
-source-index pass over `serde_yml::loader::Loader`. Its parsed document events
-carry marks with byte index, line, and column. That avoids adding a second YAML
-parser only for spans.
-
-The first useful slice should attach operation-level locations:
+The first implemented slice attaches operation-level locations:
 
 - `/rules/0/defaults`
 - `/rules/0/overrides`
 - `/rules/0/delete`
 - `/rules/0/replace`
 
-Leaf-level value locations should be added as a second layer and treated as
-best-effort detail. They require carrying each relative value path from a rule
-operation through `record_generated_paths`.
+Leaf-level value locations are not implemented yet. They should be added as a
+second layer and treated as best-effort detail. They require carrying each
+relative value path from a rule operation through `record_generated_paths`.
 
 The intended shape is:
 
@@ -73,9 +71,9 @@ The intended shape is:
 }
 ```
 
-`operationLocation` should be the default display because it is stable and
-usually enough to answer "which rule did this?" `valueLocation` should be shown
-in expanded output once it exists.
+`operationLocation` is the default display because it is stable and usually
+enough to answer "which rule did this?" `valueLocation` should be shown in
+expanded output once it exists.
 
 ## Open Questions
 
