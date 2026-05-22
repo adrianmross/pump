@@ -3,7 +3,7 @@
 Pump is an experiment in sparse config hydration for GitOps and declarative
 configuration.
 
-![Pump terminal demo](docs/assets/pump-demo.gif)
+![Pump terminal demo](docs/assets/pump-demo-diff.gif)
 
 The core workflow is:
 
@@ -197,7 +197,7 @@ make demo
 
 The demo recipe expects [`vhs`](https://github.com/charmbracelet/vhs) and
 [`bat`](https://github.com/sharkdp/bat) to be installed and writes
-`docs/assets/pump-demo.gif`.
+`docs/assets/pump-demo-diff.gif`.
 
 ## Development
 

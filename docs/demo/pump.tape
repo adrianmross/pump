@@ -1,4 +1,4 @@
-Output docs/assets/pump-demo.gif
+Output docs/assets/pump-demo-diff.gif
 
 Set Shell "bash"
 Set FontSize 16
