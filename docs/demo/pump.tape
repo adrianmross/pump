@@ -6,22 +6,34 @@ Set Width 1080
 Set Height 620
 Set Padding 18
 
-Type "bat --style=plain --paging=never --color=always --language=json examples/object/source.json"
+Type "cd examples/object"
+Enter
+Sleep 500ms
+
+Type "alias b='bat --style=plain --paging=never --color=always'"
+Enter
+Sleep 500ms
+
+Type "b --language=json source.json"
 Enter
 Sleep 1s
 
-Type "bat --style=plain --paging=never --color=always --language=yaml examples/object/rules.pump.yaml"
+Type "b --language=yaml rules.pump.yaml"
 Enter
 Sleep 1s
 
-Type "pump diff examples/object/source.json --rules examples/object/rules.pump.yaml | bat --style=plain --paging=never --color=always --language=diff"
+Type "pump diff source.json --rules rules.pump.yaml | b --language=diff"
 Enter
 Sleep 1.5s
 
-Type "pump explain examples/object/source.json --rules examples/object/rules.pump.yaml --path '$.api.resources.memory'"
+Type "pump explain source.json --rules rules.pump.yaml --path '$.api.resources.memory'"
 Enter
 Sleep 1s
 
-Type "pump diff examples/kubernetes/source.yaml --rules examples/kubernetes/rules.pump.yaml | bat --style=plain --paging=never --color=always --language=diff"
+Type "cd ../kubernetes"
+Enter
+Sleep 500ms
+
+Type "pump diff source.yaml --rules rules.pump.yaml | b --language=diff"
 Enter
 Sleep 1.5s
