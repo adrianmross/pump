@@ -39,7 +39,7 @@ cargo install --path .
 For local development:
 
 ```sh
-cargo run -- inflate examples/object/source.json --rules examples/object/rules.pump.yaml
+cargo run -- diff examples/object/source.json --rules examples/object/rules.pump.yaml
 ```
 
 ## CLI shape
@@ -121,24 +121,51 @@ Path syntax:
 
 ## Examples
 
-JSON object defaults:
+Service catalog defaults:
 
 ```sh
-cargo run -- inflate examples/object/source.json --rules examples/object/rules.pump.yaml
-cargo run -- diff examples/object/source.json --rules examples/object/rules.pump.yaml
-cargo run -- explain examples/object/source.json --rules examples/object/rules.pump.yaml --path '$.second.bottom'
+cd examples/object
+pump diff source.json --rules rules.pump.yaml
+pump explain source.json --rules rules.pump.yaml --path '$.api.resources.memory'
+```
+
+The source stays sparse:
+
+```json
+{
+  "api": {
+    "image": "ghcr.io/acme/payments-api:v1.8.0",
+    "port": 8080,
+    "resources": {
+      "cpu": "250m"
+    }
+  }
+}
+```
+
+The diff shows what Pump adds:
+
+```diff
+ "resources": {
+-  "cpu": "250m"
++  "cpu": "250m",
++  "memory": "128Mi"
+ },
++"replicas": 1,
++"env": "prod"
 ```
 
 Kubernetes-style YAML stream:
 
 ```sh
-cargo run -- inflate examples/kubernetes/source.yaml --rules examples/kubernetes/rules.pump.yaml
-cargo run -- explain examples/kubernetes/source.yaml --rules examples/kubernetes/rules.pump.yaml --path '$.spec.template.spec.containers.*.resources.requests.cpu'
+cd examples/kubernetes
+pump diff source.yaml --rules rules.pump.yaml
+pump explain source.yaml --rules rules.pump.yaml --path '$.spec.replicas'
 ```
 
 See [the Kubernetes example](examples/kubernetes/README.md) for a small
-GitOps-style sparse/inflated workflow with generated labels, workload defaults,
-Service defaults, deletes, overrides, and provenance.
+GitOps-style sparse/inflated workflow with generated labels, selectors,
+replicas, workload defaults, Service defaults, and provenance.
 
 Biome-style checking:
 
@@ -168,8 +195,9 @@ To refresh the README terminal demo after CLI semantics settle:
 make demo
 ```
 
-The demo recipe expects [`vhs`](https://github.com/charmbracelet/vhs) to be
-installed and writes `docs/assets/pump-demo.gif`.
+The demo recipe expects [`vhs`](https://github.com/charmbracelet/vhs) and
+[`bat`](https://github.com/sharkdp/bat) to be installed and writes
+`docs/assets/pump-demo.gif`.
 
 ## Development
 

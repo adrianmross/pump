@@ -2,34 +2,26 @@ Output docs/assets/pump-demo.gif
 
 Set Shell "bash"
 Set FontSize 16
-Set Width 960
-Set Height 560
+Set Width 1080
+Set Height 620
 Set Padding 18
 
-Type "pump --help"
+Type "bat --style=plain --paging=never --color=always --language=json examples/object/source.json"
 Enter
 Sleep 1s
 
-Type "pump check examples/object/source.json --rules examples/object/rules.pump.yaml"
+Type "bat --style=plain --paging=never --color=always --language=yaml examples/object/rules.pump.yaml"
 Enter
 Sleep 1s
 
-Type "pump diff examples/object/source.json --rules examples/object/rules.pump.yaml"
+Type "pump diff examples/object/source.json --rules examples/object/rules.pump.yaml | bat --style=plain --paging=never --color=always --language=diff"
+Enter
+Sleep 1.5s
+
+Type "pump explain examples/object/source.json --rules examples/object/rules.pump.yaml --path '$.api.resources.memory'"
 Enter
 Sleep 1s
 
-Type "cp examples/object/source.json /tmp/pump-demo.json"
+Type "pump diff examples/kubernetes/source.yaml --rules examples/kubernetes/rules.pump.yaml | bat --style=plain --paging=never --color=always --language=diff"
 Enter
-Sleep 400ms
-
-Type "pump check /tmp/pump-demo.json --rules examples/object/rules.pump.yaml --write"
-Enter
-Sleep 1s
-
-Type "pump check /tmp/pump-demo.json --rules examples/object/rules.pump.yaml --strict"
-Enter
-Sleep 1s
-
-Type "pump explain examples/object/source.json --rules examples/object/rules.pump.yaml --path '$.second.bottom'"
-Enter
-Sleep 1s
+Sleep 1.5s

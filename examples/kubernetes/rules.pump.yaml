@@ -1,50 +1,64 @@
 rules:
-  - name: managed-object-labels
-    match: "$.metadata.labels"
+  - name: object-labels
+    match: "$.metadata"
     defaults:
-      app.kubernetes.io/part-of: billing
+      labels:
+        app.kubernetes.io/name: checkout-api
+        app.kubernetes.io/part-of: checkout
+        app.kubernetes.io/team: payments
     overrides:
-      app.kubernetes.io/managed-by: pump
-  - name: drop-author-hints
-    match: "$.metadata.annotations"
-    delete:
-      - pump\.dev/author-note
-  - name: deployment-platform-defaults
-    match: "$.spec.template.spec"
-    apiVersion: apps/v1
-    kind: Deployment
-    defaults:
-      securityContext:
-        runAsNonRoot: true
-        seccompProfile:
-          type: RuntimeDefault
-  - name: deployment-replica-default
+      labels:
+        app.kubernetes.io/managed-by: pump
+  - name: deployment-shape
     match: "$.spec"
     apiVersion: apps/v1
     kind: Deployment
+    metadataName: checkout-api
     defaults:
       replicas: 2
-  - name: container-runtime-defaults
+      selector:
+        matchLabels:
+          app.kubernetes.io/name: checkout-api
+  - name: pod-template-shape
+    match: "$.spec.template"
+    apiVersion: apps/v1
+    kind: Deployment
+    metadataName: checkout-api
+    defaults:
+      metadata:
+        labels:
+          app.kubernetes.io/name: checkout-api
+      spec:
+        securityContext:
+          runAsNonRoot: true
+          seccompProfile:
+            type: RuntimeDefault
+  - name: container-defaults
     match: "$.spec.template.spec.containers.*"
     apiVersion: apps/v1
     kind: Deployment
+    metadataName: checkout-api
     defaults:
       imagePullPolicy: IfNotPresent
       resources:
         requests:
           cpu: 100m
           memory: 128Mi
-  - name: billing-service-defaults
+  - name: service-shape
     match: "$.spec"
     apiVersion: v1
     kind: Service
-    metadataName: billing-api
+    metadataName: checkout-api
     defaults:
+      selector:
+        app.kubernetes.io/name: checkout-api
       type: ClusterIP
   - name: service-port-defaults
     match: "$.spec.ports.*"
     apiVersion: v1
     kind: Service
+    metadataName: checkout-api
     defaults:
+      name: http
       protocol: TCP
-      targetPort: http
+      targetPort: 8080

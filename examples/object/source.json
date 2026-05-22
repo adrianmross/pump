@@ -1,15 +1,17 @@
 {
-  "first": {
-    "top": "a",
-    "middle": 5
+  "api": {
+    "image": "ghcr.io/acme/payments-api:v1.8.0",
+    "port": 8080,
+    "resources": {
+      "cpu": "250m"
+    }
   },
-  "second": {
-    "top": "b",
-    "middle": 5,
-    "very-bottom": 0
+  "worker": {
+    "image": "ghcr.io/acme/payments-worker:v1.8.0",
+    "queue": "payments"
   },
-  "third": {
-    "top": "a",
-    "middle": 10
+  "scheduler": {
+    "image": "ghcr.io/acme/payments-scheduler:v1.8.0",
+    "schedule": "*/10 * * * *"
   }
 }

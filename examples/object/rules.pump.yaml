@@ -1,7 +1,12 @@
 rules:
-  - name: default-item-shape
+  - name: service-shape
     match: "$.*"
     defaults:
-      top: a
-      middle: 5
-      bottom: z
+      replicas: 1
+      env: prod
+      resources:
+        cpu: 100m
+        memory: 128Mi
+      telemetry:
+        logs: true
+        metrics: true

@@ -10,6 +10,12 @@ if ! command -v vhs >/dev/null 2>&1; then
   exit 1
 fi
 
+if ! command -v bat >/dev/null 2>&1; then
+  echo "bat is required for syntax-highlighted demo rendering" >&2
+  echo "Install it from https://github.com/sharkdp/bat, then rerun make demo." >&2
+  exit 1
+fi
+
 cargo build --release --locked
 export PATH="$repo_root/target/release:$PATH"
 
