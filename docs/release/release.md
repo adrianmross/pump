@@ -37,6 +37,19 @@ make dist-build
 `make dist-build` builds local artifacts only. It does not push tags, create
 GitHub releases, update a tap, or publish packages.
 
+For a conservative release dry-run helper, use:
+
+```sh
+scripts/release-patch.sh
+```
+
+The helper calculates the next patch version by default, or accepts
+`VERSION=0.1.2` / `--version v0.1.2`. It runs `make ci` and
+`dist plan --tag vX.Y.Z`, then prints the exact manual commands for tag push,
+release dispatch/watch, and Homebrew tap copy/validation. By default it does
+not push tags, dispatch workflows, edit the tap checkout, or run Homebrew
+validation; those steps require explicit flags.
+
 ## Remote Release
 
 - Move relevant `CHANGELOG.md` entries from `Unreleased` into the release

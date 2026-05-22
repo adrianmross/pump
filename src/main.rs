@@ -1,10 +1,11 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand, ValueEnum};
+use indexmap::IndexMap;
 use saphyr::LoadableYamlNode;
 use serde::Serialize;
 use similar::TextDiff;
@@ -30,17 +31,26 @@ enum Commands {
         about = "Inflate sparse config by applying rule defaults"
     )]
     Inflate {
-        #[arg(help = "Input JSON/YAML file")]
-        input: PathBuf,
+        #[arg(help = "Input JSON/YAML file; defaults to config inputs")]
+        input: Option<PathBuf>,
 
-        #[arg(short, long, help = "Pump rule file")]
-        rules: PathBuf,
+        #[arg(short, long, help = "Pump rule file; defaults to config rules")]
+        rules: Option<PathBuf>,
 
         #[arg(short, long, help = "Output file; prints to stdout when omitted")]
         out: Option<PathBuf>,
 
+        #[arg(long, help = "Output directory for config or batch inputs")]
+        out_dir: Option<PathBuf>,
+
         #[arg(long, value_enum, help = "Force output format")]
         format: Option<OutputFormat>,
+
+        #[arg(
+            long,
+            help = "Project config file; defaults to pump.yaml or .pump.yaml"
+        )]
+        config: Option<PathBuf>,
 
         #[arg(long, help = "Write machine-readable provenance JSON to this file")]
         provenance_out: Option<PathBuf>,
@@ -51,14 +61,20 @@ enum Commands {
         about = "Deflate verbose config by removing values equal to defaults"
     )]
     Deflate {
-        #[arg(help = "Input JSON/YAML file")]
-        input: PathBuf,
+        #[arg(help = "Input JSON/YAML file; defaults to config inputs")]
+        input: Option<PathBuf>,
 
-        #[arg(short, long, help = "Pump rule file")]
-        rules: PathBuf,
+        #[arg(short, long, help = "Pump rule file; defaults to config rules")]
+        rules: Option<PathBuf>,
 
         #[arg(short, long, help = "Output file; prints to stdout when omitted")]
         out: Option<PathBuf>,
+
+        #[arg(
+            long,
+            help = "Project config file; defaults to pump.yaml or .pump.yaml"
+        )]
+        config: Option<PathBuf>,
 
         #[arg(long, value_enum, help = "Force output format")]
         format: Option<OutputFormat>,
@@ -79,8 +95,8 @@ enum Commands {
         #[arg(help = "Input JSON/YAML file")]
         input: PathBuf,
 
-        #[arg(short, long, help = "Pump rule file")]
-        rules: PathBuf,
+        #[arg(short, long, help = "Pump rule file; defaults to config rules")]
+        rules: Option<PathBuf>,
 
         #[arg(short, long, help = "Path to inspect, such as '$.spec.replicas'")]
         path: String,
@@ -93,31 +109,42 @@ enum Commands {
             help = "Include the full rule trace, not just related operations"
         )]
         all: bool,
+
+        #[arg(
+            long,
+            help = "Project config file; defaults to pump.yaml or .pump.yaml"
+        )]
+        config: Option<PathBuf>,
     },
 
     #[command(about = "Show a unified diff from input to inflated output")]
     Diff {
-        #[arg(help = "Input JSON/YAML file")]
-        input: PathBuf,
+        #[arg(help = "Input JSON/YAML file; defaults to config inputs")]
+        input: Option<PathBuf>,
 
-        #[arg(short, long, help = "Pump rule file")]
-        rules: PathBuf,
+        #[arg(short, long, help = "Pump rule file; defaults to config rules")]
+        rules: Option<PathBuf>,
 
         #[arg(long, value_enum, help = "Force output format")]
         format: Option<OutputFormat>,
+
+        #[arg(long, help = "Print generated-value rule provenance after the diff")]
+        explain: bool,
+
+        #[arg(
+            long,
+            help = "Project config file; defaults to pump.yaml or .pump.yaml"
+        )]
+        config: Option<PathBuf>,
     },
 
     #[command(about = "Validate that input and rules can be inflated")]
     Check {
-        #[arg(
-            value_name = "INPUT",
-            required = true,
-            help = "Input JSON/YAML file(s)"
-        )]
+        #[arg(value_name = "INPUT", help = "Input JSON/YAML file(s)")]
         inputs: Vec<PathBuf>,
 
-        #[arg(short, long, help = "Pump rule file")]
-        rules: PathBuf,
+        #[arg(short, long, help = "Pump rule file; defaults to config rules")]
+        rules: Option<PathBuf>,
 
         #[arg(long, help = "Fail if applying rules would change the input")]
         strict: bool,
@@ -131,13 +158,54 @@ enum Commands {
 
         #[arg(long, value_enum, help = "Force output format")]
         format: Option<OutputFormat>,
+
+        #[arg(
+            long,
+            help = "Project config file; defaults to pump.yaml or .pump.yaml"
+        )]
+        config: Option<PathBuf>,
+    },
+
+    #[command(
+        visible_alias = "discover",
+        about = "Suggest default rules from repeated input values"
+    )]
+    Suggest {
+        #[arg(
+            value_name = "INPUT",
+            help = "Input JSON/YAML file(s); defaults to config inputs"
+        )]
+        inputs: Vec<PathBuf>,
+
+        #[arg(long, default_value_t = 2, help = "Minimum repeated occurrences")]
+        min_occurrences: usize,
+
+        #[arg(short, long, help = "Output rule file; prints to stdout when omitted")]
+        out: Option<PathBuf>,
+
+        #[arg(long, help = "Print machine-readable JSON suggestions")]
+        json: bool,
+
+        #[arg(
+            long,
+            help = "Project config file; defaults to pump.yaml or .pump.yaml"
+        )]
+        config: Option<PathBuf>,
     },
 }
 
-#[derive(Clone, Copy, Debug, ValueEnum)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 enum OutputFormat {
     Json,
     Yaml,
+}
+
+#[derive(Debug)]
+struct ProjectConfig {
+    rules: Option<PathBuf>,
+    inputs: Vec<PathBuf>,
+    out_dir: Option<PathBuf>,
+    format: Option<OutputFormat>,
 }
 
 #[derive(Debug)]
@@ -241,6 +309,28 @@ struct CheckResult {
     documents: usize,
     generated: usize,
     changed: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct SuggestedDefault {
+    match_path: String,
+    defaults_path: String,
+    value: Value,
+    occurrences: usize,
+}
+
+#[derive(Debug, Serialize)]
+struct SuggestOutput {
+    suggestions: Vec<SuggestedDefault>,
+}
+
+#[derive(Debug)]
+struct SuggestCandidate {
+    match_path: String,
+    defaults_path: Vec<String>,
+    value: Value,
+    occurrences: usize,
+    roots: HashSet<String>,
 }
 
 struct OperationContext<'location, 'operations> {
@@ -362,26 +452,43 @@ fn main() -> Result<()> {
             input,
             rules,
             out,
+            out_dir,
             format,
+            config,
             provenance_out,
         } => {
-            let mut docs = read_input(&input)?;
+            let config = load_project_config(config.as_deref())?;
+            let inputs = resolve_inputs(input.into_iter().collect(), config.as_ref())?;
+            let rules = resolve_rules(rules, config.as_ref())?;
+            let out_dir = if out.is_some() {
+                out_dir
+            } else {
+                out_dir.or_else(|| config.as_ref().and_then(|config| config.out_dir.clone()))
+            };
+            let format = format.or_else(|| config.as_ref().and_then(|config| config.format));
             let rule_file = read_rules(&rules)?;
-            let mut provenance = HashMap::new();
-            inflate(&mut docs, &rule_file, &mut provenance)?;
-            write_output(&docs, &input, out.as_deref(), format)?;
-            if let Some(provenance_out) = provenance_out {
-                write_provenance(&provenance, &provenance_out)?;
-            }
+            inflate_inputs(
+                &inputs,
+                &rule_file,
+                out.as_deref(),
+                out_dir.as_deref(),
+                format,
+                provenance_out.as_deref(),
+            )?;
         }
         Commands::Deflate {
             input,
             rules,
             out,
+            config,
             format,
             dry_run,
             protect,
         } => {
+            let config = load_project_config(config.as_deref())?;
+            let input = resolve_single_input(input, config.as_ref(), "deflate")?;
+            let rules = resolve_rules(rules, config.as_ref())?;
+            let format = format.or_else(|| config.as_ref().and_then(|config| config.format));
             let mut docs = read_input(&input)?;
             let rule_file = read_rules(&rules)?;
             let output_format = output_format(&input, out.as_deref(), format);
@@ -404,7 +511,10 @@ fn main() -> Result<()> {
             path,
             json,
             all,
+            config,
         } => {
+            let config = load_project_config(config.as_deref())?;
+            let rules = resolve_rules(rules, config.as_ref())?;
             let mut docs = read_input(&input)?;
             let rule_file = read_rules(&rules)?;
             let mut provenance = HashMap::new();
@@ -416,14 +526,15 @@ fn main() -> Result<()> {
             input,
             rules,
             format,
+            explain,
+            config,
         } => {
-            let mut docs = read_input(&input)?;
+            let config = load_project_config(config.as_deref())?;
+            let inputs = resolve_inputs(input.into_iter().collect(), config.as_ref())?;
+            let rules = resolve_rules(rules, config.as_ref())?;
+            let format = format.or_else(|| config.as_ref().and_then(|config| config.format));
             let rule_file = read_rules(&rules)?;
-            let before = format_docs(&docs, output_format(&input, None, format))?;
-            let mut provenance = HashMap::new();
-            inflate(&mut docs, &rule_file, &mut provenance)?;
-            let after = format_docs(&docs, output_format(&input, None, format))?;
-            print_diff(&before, &after, "inflated");
+            diff_inputs(&inputs, &rule_file, format, explain)?;
         }
         Commands::Check {
             inputs,
@@ -431,13 +542,180 @@ fn main() -> Result<()> {
             strict,
             write,
             format,
+            config,
         } => {
+            let config = load_project_config(config.as_deref())?;
+            let inputs = resolve_inputs(inputs, config.as_ref())?;
+            let rules = resolve_rules(rules, config.as_ref())?;
+            let format = format.or_else(|| config.as_ref().and_then(|config| config.format));
             let rule_file = read_rules(&rules)?;
             check_inputs(&inputs, &rule_file, strict, write, format)?;
+        }
+        Commands::Suggest {
+            inputs,
+            min_occurrences,
+            out,
+            json,
+            config,
+        } => {
+            let config = load_project_config(config.as_deref())?;
+            let inputs = resolve_inputs(inputs, config.as_ref())?;
+            suggest_rules(&inputs, min_occurrences, out.as_deref(), json)?;
         }
     }
 
     Ok(())
+}
+
+fn load_project_config(path: Option<&Path>) -> Result<Option<ProjectConfig>> {
+    let Some(path) = path.map(PathBuf::from).or_else(discover_project_config) else {
+        return Ok(None);
+    };
+
+    let input = fs::read_to_string(&path)
+        .with_context(|| format!("failed to read config {}", path.display()))?;
+    let root = match detect_format(&path) {
+        OutputFormat::Json => Value::from_json(
+            serde_json::from_str(&input)
+                .with_context(|| format!("failed to parse JSON config {}", path.display()))?,
+        ),
+        OutputFormat::Yaml => Value::parse_yaml_documents(&input)
+            .with_context(|| format!("failed to parse YAML config {}", path.display()))?
+            .into_iter()
+            .next()
+            .with_context(|| format!("{} did not contain a config document", path.display()))?,
+    };
+    let Some(map) = root.as_mapping() else {
+        bail!("{} config must be a mapping", path.display());
+    };
+    let base = path.parent().unwrap_or_else(|| Path::new("."));
+    let rules =
+        optional_config_string(map, "rules")?.map(|rules| resolve_relative_path(base, rules));
+    let mut inputs = Vec::new();
+
+    if let Some(input) = optional_config_string(map, "input")? {
+        inputs.push(resolve_relative_path(base, input));
+    }
+
+    if let Some(value) = map.get("inputs") {
+        match value {
+            Value::String(input) => inputs.push(resolve_relative_path(base, input)),
+            _ => {
+                let Some(items) = value.as_sequence() else {
+                    bail!("{}.inputs must be a string or sequence", path.display());
+                };
+
+                for (index, item) in items.iter().enumerate() {
+                    let Some(input) = item.as_str() else {
+                        bail!("{}.inputs[{index}] must be a string", path.display());
+                    };
+                    inputs.push(resolve_relative_path(base, input));
+                }
+            }
+        }
+    }
+
+    let out_dir = optional_config_string(map, "outDir")?
+        .or(optional_config_string(map, "out-dir")?)
+        .or(optional_config_string(map, "out_dir")?)
+        .map(|out_dir| resolve_relative_path(base, out_dir));
+    let format = optional_config_string(map, "format")?
+        .map(|format| parse_output_format_name(&format))
+        .transpose()?;
+
+    Ok(Some(ProjectConfig {
+        rules,
+        inputs,
+        out_dir,
+        format,
+    }))
+}
+
+fn discover_project_config() -> Option<PathBuf> {
+    [
+        "pump.yaml",
+        ".pump.yaml",
+        "pump.yml",
+        ".pump.yml",
+        "pump.json",
+        ".pump.json",
+    ]
+    .into_iter()
+    .map(PathBuf::from)
+    .find(|path| path.exists())
+}
+
+fn optional_config_string(map: &IndexMap<String, Value>, key: &str) -> Result<Option<String>> {
+    let Some(value) = map.get(key) else {
+        return Ok(None);
+    };
+
+    value
+        .as_str()
+        .map(|value| Some(value.to_string()))
+        .with_context(|| format!("config field {key} must be a string"))
+}
+
+fn resolve_relative_path(base: &Path, value: impl AsRef<Path>) -> PathBuf {
+    let path = value.as_ref();
+
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        base.join(path)
+    }
+}
+
+fn resolve_rules(explicit: Option<PathBuf>, config: Option<&ProjectConfig>) -> Result<PathBuf> {
+    explicit
+        .or_else(|| config.and_then(|config| config.rules.clone()))
+        .context("missing rules file; pass --rules or set rules in pump.yaml")
+}
+
+fn resolve_inputs(explicit: Vec<PathBuf>, config: Option<&ProjectConfig>) -> Result<Vec<PathBuf>> {
+    if !explicit.is_empty() {
+        return Ok(explicit);
+    }
+
+    let inputs = config
+        .map(|config| config.inputs.clone())
+        .unwrap_or_default();
+
+    if inputs.is_empty() {
+        bail!("missing input file; pass input path(s) or set inputs in pump.yaml");
+    }
+
+    Ok(inputs)
+}
+
+fn resolve_single_input(
+    explicit: Option<PathBuf>,
+    config: Option<&ProjectConfig>,
+    command: &str,
+) -> Result<PathBuf> {
+    if let Some(input) = explicit {
+        return Ok(input);
+    }
+
+    let inputs = config
+        .map(|config| config.inputs.clone())
+        .unwrap_or_default();
+
+    match inputs.as_slice() {
+        [input] => Ok(input.clone()),
+        [] => {
+            bail!("missing input file for {command}; pass an input or set one input in pump.yaml")
+        }
+        _ => bail!("{command} supports one input; pass an input explicitly or configure one input"),
+    }
+}
+
+fn parse_output_format_name(value: &str) -> Result<OutputFormat> {
+    match value {
+        "json" => Ok(OutputFormat::Json),
+        "yaml" | "yml" => Ok(OutputFormat::Yaml),
+        _ => bail!("format must be json or yaml, got {value}"),
+    }
 }
 
 fn read_input(path: &Path) -> Result<Vec<Value>> {
@@ -709,6 +987,13 @@ fn validate_rule(rule: &Rule) -> Result<()> {
     let has_overrides = rule.overrides.is_some();
     let has_delete = !rule.delete.is_empty();
     let has_replace = rule.replace.is_some();
+
+    parse_path(&rule.match_path).with_context(|| {
+        format!(
+            "rule {} has invalid match path {}",
+            rule.name, rule.match_path
+        )
+    })?;
 
     if !(has_defaults || has_overrides || has_delete || has_replace) {
         bail!("rule {} does not define an operation", rule.name);
@@ -1059,6 +1344,305 @@ fn check_inputs(
     );
 
     Ok(())
+}
+
+fn inflate_inputs(
+    input_paths: &[PathBuf],
+    rule_file: &RuleFile,
+    out: Option<&Path>,
+    out_dir: Option<&Path>,
+    format: Option<OutputFormat>,
+    provenance_out: Option<&Path>,
+) -> Result<()> {
+    if out.is_some() && out_dir.is_some() {
+        bail!("use either --out or --out-dir, not both");
+    }
+
+    if input_paths.len() > 1 {
+        if out.is_some() {
+            bail!("--out can only be used with one input; use --out-dir for multiple inputs");
+        }
+
+        if provenance_out.is_some() {
+            bail!("--provenance-out can only be used with one input");
+        }
+
+        let Some(out_dir) = out_dir else {
+            bail!("inflating multiple inputs requires --out-dir or config outDir");
+        };
+
+        fs::create_dir_all(out_dir)
+            .with_context(|| format!("failed to create output directory {}", out_dir.display()))?;
+
+        let mut output_names = HashSet::new();
+
+        for input_path in input_paths {
+            let file_name = input_path
+                .file_name()
+                .with_context(|| format!("input {} has no file name", input_path.display()))?;
+
+            if !output_names.insert(file_name.to_os_string()) {
+                bail!(
+                    "multiple inputs would write {}; use unique file names for batch output",
+                    out_dir.join(file_name).display()
+                );
+            }
+
+            let out_path = out_dir.join(file_name);
+            let mut docs = read_input(input_path)?;
+            let mut provenance = HashMap::new();
+            inflate(&mut docs, rule_file, &mut provenance)?;
+            write_output(&docs, input_path, Some(&out_path), format)?;
+            println!("wrote: {}", out_path.display());
+        }
+
+        return Ok(());
+    }
+
+    let input_path = input_paths
+        .first()
+        .context("missing input file; pass input path(s) or set inputs in pump.yaml")?;
+    let out_path = out_dir
+        .map(|out_dir| {
+            input_path
+                .file_name()
+                .map(|file_name| out_dir.join(file_name))
+                .with_context(|| format!("input {} has no file name", input_path.display()))
+        })
+        .transpose()?;
+    let out = out.or(out_path.as_deref());
+    let mut docs = read_input(input_path)?;
+    let mut provenance = HashMap::new();
+
+    if let Some(out_dir) = out_dir {
+        fs::create_dir_all(out_dir)
+            .with_context(|| format!("failed to create output directory {}", out_dir.display()))?;
+    }
+
+    inflate(&mut docs, rule_file, &mut provenance)?;
+    write_output(&docs, input_path, out, format)?;
+
+    if let Some(provenance_out) = provenance_out {
+        write_provenance(&provenance, provenance_out)?;
+    }
+
+    Ok(())
+}
+
+fn diff_inputs(
+    input_paths: &[PathBuf],
+    rule_file: &RuleFile,
+    format: Option<OutputFormat>,
+    explain: bool,
+) -> Result<()> {
+    for (index, input_path) in input_paths.iter().enumerate() {
+        if input_paths.len() > 1 {
+            if index > 0 {
+                println!();
+            }
+            println!("diff: {}", input_path.display());
+        }
+
+        let mut docs = read_input(input_path)?;
+        let output_format = output_format(input_path, None, format);
+        let before = format_docs(&docs, output_format)?;
+        let mut provenance = HashMap::new();
+        let mut traces = Vec::new();
+
+        if explain {
+            inflate_with_traces(&mut docs, rule_file, &mut provenance, Some(&mut traces))?;
+        } else {
+            inflate(&mut docs, rule_file, &mut provenance)?;
+        }
+
+        let after = format_docs(&docs, output_format)?;
+        print_diff(&before, &after, "inflated");
+
+        if explain {
+            print_diff_explanations(&traces);
+        }
+    }
+
+    Ok(())
+}
+
+fn suggest_rules(
+    input_paths: &[PathBuf],
+    min_occurrences: usize,
+    out: Option<&Path>,
+    json: bool,
+) -> Result<()> {
+    if min_occurrences < 2 {
+        bail!("--min-occurrences must be at least 2");
+    }
+
+    let mut candidates = HashMap::new();
+
+    for (file_index, input_path) in input_paths.iter().enumerate() {
+        let docs = read_input(input_path)?;
+
+        for (doc_index, doc) in docs.iter().enumerate() {
+            collect_suggest_candidates(
+                doc,
+                &mut Vec::new(),
+                file_index,
+                doc_index,
+                &mut candidates,
+            )?;
+        }
+    }
+
+    let mut candidates = candidates
+        .into_values()
+        .filter(|candidate: &SuggestCandidate| candidate.occurrences >= min_occurrences)
+        .collect::<Vec<_>>();
+    candidates.sort_by(|left, right| {
+        right
+            .occurrences
+            .cmp(&left.occurrences)
+            .then_with(|| left.match_path.cmp(&right.match_path))
+            .then_with(|| left.defaults_path.cmp(&right.defaults_path))
+    });
+
+    if json {
+        let suggestions = candidates
+            .into_iter()
+            .map(|candidate| SuggestedDefault {
+                match_path: candidate.match_path,
+                defaults_path: json_pointer(&candidate.defaults_path),
+                value: candidate.value,
+                occurrences: candidate.occurrences,
+            })
+            .collect();
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&SuggestOutput { suggestions })?
+        );
+        return Ok(());
+    }
+
+    if candidates.is_empty() {
+        bail!(
+            "no repeated defaults found; lower --min-occurrences or run suggest against inflated examples"
+        );
+    }
+
+    let rule_file = suggested_rule_file(&candidates);
+    let output = format_docs(&[rule_file], OutputFormat::Yaml)?;
+
+    if let Some(out) = out {
+        fs::write(out, output)
+            .with_context(|| format!("failed to write suggested rules {}", out.display()))?;
+    } else {
+        print!("{output}");
+    }
+
+    Ok(())
+}
+
+fn collect_suggest_candidates(
+    value: &Value,
+    path: &mut Vec<String>,
+    file_index: usize,
+    doc_index: usize,
+    candidates: &mut HashMap<String, SuggestCandidate>,
+) -> Result<()> {
+    if let Some(map) = value.as_mapping() {
+        for (key, child) in map {
+            path.push(key.clone());
+            collect_suggest_candidates(child, path, file_index, doc_index, candidates)?;
+            path.pop();
+        }
+
+        return Ok(());
+    }
+
+    if let Some(items) = value.as_sequence() {
+        for (index, child) in items.iter().enumerate() {
+            path.push(index.to_string());
+            collect_suggest_candidates(child, path, file_index, doc_index, candidates)?;
+            path.pop();
+        }
+
+        return Ok(());
+    }
+
+    if path.is_empty() || path.iter().any(|segment| segment.parse::<usize>().is_ok()) {
+        return Ok(());
+    }
+
+    let value_key = serde_json::to_string(value)?;
+    let root_key = format!("{}:{}:{}", file_index, doc_index, json_pointer(path));
+
+    for (match_segments, defaults_path) in suggest_patterns(path) {
+        let match_path = path_to_rule_path(&match_segments);
+        let key = format!("{match_path}:{}:{value_key}", json_pointer(&defaults_path));
+        let entry = candidates.entry(key).or_insert_with(|| SuggestCandidate {
+            match_path,
+            defaults_path,
+            value: value.clone(),
+            occurrences: 0,
+            roots: HashSet::new(),
+        });
+
+        if entry.roots.insert(root_key.clone()) {
+            entry.occurrences += 1;
+        }
+    }
+
+    Ok(())
+}
+
+fn suggest_patterns(path: &[String]) -> Vec<(Vec<String>, Vec<String>)> {
+    let Some((leaf, parent)) = path.split_last() else {
+        return Vec::new();
+    };
+
+    let mut patterns = Vec::new();
+    patterns.push((parent.to_vec(), vec![leaf.clone()]));
+
+    for wildcard_index in 0..parent.len() {
+        let mut match_path = parent.to_vec();
+        match_path[wildcard_index] = "*".to_string();
+        patterns.push((match_path, vec![leaf.clone()]));
+    }
+
+    patterns
+}
+
+fn suggested_rule_file(candidates: &[SuggestCandidate]) -> Value {
+    let mut rules = Vec::new();
+
+    for (index, candidate) in candidates.iter().enumerate() {
+        let mut rule = IndexMap::new();
+        rule.insert(
+            "name".to_string(),
+            Value::String(format!("suggested-default-{}", index + 1)),
+        );
+        rule.insert(
+            "match".to_string(),
+            Value::String(candidate.match_path.clone()),
+        );
+        rule.insert(
+            "defaults".to_string(),
+            nested_default(&candidate.defaults_path, candidate.value.clone()),
+        );
+        rules.push(Value::Mapping(rule));
+    }
+
+    let mut root = IndexMap::new();
+    root.insert("rules".to_string(), Value::Sequence(rules));
+    Value::Mapping(root)
+}
+
+fn nested_default(path: &[String], value: Value) -> Value {
+    let Some((head, tail)) = path.split_first() else {
+        return value;
+    };
+
+    let mut map = IndexMap::new();
+    map.insert(head.clone(), nested_default(tail, value));
+    Value::Mapping(map)
 }
 
 fn check_docs(
@@ -1749,6 +2333,67 @@ fn print_trace(traces: &[RuleTrace]) {
     }
 }
 
+fn print_diff_explanations(traces: &[RuleTrace]) {
+    let mut operations = Vec::new();
+    let include_doc = traces
+        .iter()
+        .map(|trace| trace.doc)
+        .collect::<HashSet<_>>()
+        .len()
+        > 1;
+
+    for trace in traces {
+        for operation in &trace.operations {
+            operations.push((trace, operation));
+        }
+    }
+
+    if operations.is_empty() {
+        return;
+    }
+
+    operations.sort_by(|(_, left), (_, right)| {
+        left.path
+            .cmp(&right.path)
+            .then_with(|| left.operation.cmp(&right.operation))
+    });
+
+    println!();
+    println!("explain:");
+
+    for (trace, operation) in operations {
+        let location = operation
+            .value_location
+            .as_ref()
+            .or(operation.operation_location.as_ref())
+            .map(|location| format!(" at {}", format_location(location)))
+            .unwrap_or_default();
+        let path = if include_doc {
+            format!("doc {} {}", trace.doc, operation.path)
+        } else {
+            operation.path.clone()
+        };
+        println!(
+            "- {}: {} {} {} by rule {} ({}){}",
+            path,
+            operation.operation,
+            operation.outcome,
+            format_after_value(operation),
+            trace.rule,
+            operation.reason,
+            location
+        );
+    }
+}
+
+fn format_after_value(operation: &OperationTrace) -> String {
+    operation
+        .after
+        .as_ref()
+        .map(|value| format!("to {}", format_inline(value)))
+        .unwrap_or_else(|| "from input".to_string())
+}
+
 fn format_location(location: &SourceLocation) -> String {
     format!("{}:{}:{}", location.file, location.line, location.column)
 }
@@ -2115,6 +2760,23 @@ fn human_path(path: &[String]) -> String {
     } else {
         format!("$.{}", path.join("."))
     }
+}
+
+fn path_to_rule_path(path: &[String]) -> String {
+    if path.is_empty() {
+        return "$".to_string();
+    }
+
+    if path.iter().all(|segment| {
+        segment == "*"
+            || segment
+                .chars()
+                .all(|char| char.is_ascii_alphanumeric() || matches!(char, '_' | '-'))
+    }) {
+        return format!("$.{}", path.join("."));
+    }
+
+    json_pointer(path)
 }
 
 fn provenance_key(doc_index: usize, path: &[String]) -> String {
@@ -2829,6 +3491,123 @@ flow_authentication: !Find [authentik_flows.flow, [slug, default-authentication-
         assert_eq!(second_doc["second"]["bottom"], json!("z"));
         fs::remove_file(first).ok();
         fs::remove_file(second).ok();
+    }
+
+    #[test]
+    fn project_config_resolves_paths_relative_to_config_file() {
+        let dir = std::env::temp_dir().join(format!(
+            "pump-config-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(dir.join("src")).unwrap();
+        fs::write(
+            dir.join("pump.yaml"),
+            r#"
+rules: rules.pump.yaml
+inputs:
+  - src/app.json
+outDir: rendered
+format: json
+"#,
+        )
+        .unwrap();
+
+        let config = load_project_config(Some(&dir.join("pump.yaml")))
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(config.rules.unwrap(), dir.join("rules.pump.yaml"));
+        assert_eq!(config.inputs, vec![dir.join("src/app.json")]);
+        assert_eq!(config.out_dir.unwrap(), dir.join("rendered"));
+        assert_eq!(config.format, Some(OutputFormat::Json));
+        fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn inflate_inputs_writes_batch_outputs_to_out_dir() {
+        let dir = std::env::temp_dir().join(format!(
+            "pump-batch-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let out_dir = dir.join("rendered");
+        fs::create_dir_all(&dir).unwrap();
+        let first = dir.join("first.json");
+        let second = dir.join("second.json");
+        fs::write(&first, r#"{"first":{"top":"a","middle":5}}"#).unwrap();
+        fs::write(&second, r#"{"second":{"top":"b","middle":5}}"#).unwrap();
+
+        inflate_inputs(
+            &[first.clone(), second.clone()],
+            &rules(),
+            None,
+            Some(&out_dir),
+            Some(OutputFormat::Json),
+            None,
+        )
+        .unwrap();
+
+        let first_doc = Value::from_json(
+            serde_json::from_str(&fs::read_to_string(out_dir.join("first.json")).unwrap()).unwrap(),
+        );
+        let second_doc = Value::from_json(
+            serde_json::from_str(&fs::read_to_string(out_dir.join("second.json")).unwrap())
+                .unwrap(),
+        );
+
+        assert_eq!(first_doc["first"]["bottom"], json!("z"));
+        assert_eq!(second_doc["second"]["bottom"], json!("z"));
+        fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn suggest_rules_finds_repeated_wildcard_defaults() {
+        let input = temp_input_path("suggest-source");
+        let out = temp_input_path("suggest-rules").with_extension("pump.yaml");
+        fs::write(
+            &input,
+            r#"{
+  "api": {"env": "prod", "image": "api:v1"},
+  "worker": {"env": "prod", "image": "worker:v1"},
+  "scheduler": {"env": "prod", "image": "scheduler:v1"}
+}"#,
+        )
+        .unwrap();
+
+        suggest_rules(std::slice::from_ref(&input), 2, Some(&out), false).unwrap();
+        let rule_file = read_rules(&out).unwrap();
+
+        assert!(rule_file.rules.iter().any(|rule| {
+            rule.match_path == "$.*"
+                && rule
+                    .defaults
+                    .as_ref()
+                    .and_then(|defaults| defaults.get("env"))
+                    == Some(&json!("prod"))
+        }));
+        fs::remove_file(input).ok();
+        fs::remove_file(out).ok();
+    }
+
+    #[test]
+    fn rule_validation_rejects_invalid_match_paths() {
+        let err = rule_file(
+            r#"
+rules:
+  - name: bad-path
+    match: spec
+    defaults:
+      enabled: true
+"#,
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("invalid match path"));
     }
 
     #[test]

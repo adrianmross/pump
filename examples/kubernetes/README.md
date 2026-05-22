@@ -19,7 +19,8 @@ cd examples/kubernetes
 Show the generated shape:
 
 ```sh
-pump diff source.yaml --rules rules.pump.yaml
+pump diff
+pump diff --explain
 ```
 
 The important part of the diff is the repeated platform shape, not a second
@@ -43,7 +44,7 @@ hand-written manifest:
 Inflate and compare with the expected rendered manifest:
 
 ```sh
-pump inflate source.yaml --rules rules.pump.yaml --out /tmp/pump-kubernetes-inflated.yaml
+pump inflate --out /tmp/pump-kubernetes-inflated.yaml
 diff -u inflated.yaml /tmp/pump-kubernetes-inflated.yaml
 ```
 
@@ -56,7 +57,7 @@ pump explain source.yaml --rules rules.pump.yaml --path '$.spec.replicas'
 Verify that sparse input is not already inflated:
 
 ```sh
-pump check source.yaml --rules rules.pump.yaml --strict
+pump check --strict
 ```
 
 Deflate the rendered form back toward sparse intent:

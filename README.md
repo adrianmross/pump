@@ -27,7 +27,7 @@ brew install adrianmross/tap/pump
 Shell installer:
 
 ```sh
-curl --proto '=https' --tlsv1.2 -LsSf https://github.com/adrianmross/pump/releases/download/v0.1.1/pump-installer.sh | sh
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/adrianmross/pump/releases/download/v0.2.0/pump-installer.sh | sh
 ```
 
 From source:
@@ -48,13 +48,16 @@ Primary commands:
 
 ```sh
 pump inflate app.yaml --rules platform.pump.yaml --out rendered.yaml
+pump inflate --config pump.yaml --out-dir rendered/
 pump deflate rendered.yaml --rules platform.pump.yaml --out app.yaml
 pump explain app.yaml --rules platform.pump.yaml --path '$.spec.template.spec.securityContext'
 pump diff app.yaml --rules platform.pump.yaml
+pump diff app.yaml --rules platform.pump.yaml --explain
 pump check app.yaml --rules platform.pump.yaml
 pump check rendered.yaml --rules platform.pump.yaml --strict
 pump check app.yaml --rules platform.pump.yaml --write
 pump check services/*.yaml --rules platform.pump.yaml --strict
+pump suggest inflated/*.yaml --out suggested.pump.yaml
 ```
 
 Short aliases may be useful once the semantics are stable:
@@ -125,7 +128,8 @@ Service catalog defaults:
 
 ```sh
 cd examples/object
-pump diff source.json --rules rules.pump.yaml
+pump diff
+pump diff --explain
 pump explain source.json --rules rules.pump.yaml --path '$.api.resources.memory'
 ```
 
@@ -159,7 +163,8 @@ Kubernetes-style YAML stream:
 
 ```sh
 cd examples/kubernetes
-pump diff source.yaml --rules rules.pump.yaml
+pump diff
+pump diff --explain
 pump explain source.yaml --rules rules.pump.yaml --path '$.spec.replicas'
 ```
 
@@ -184,10 +189,41 @@ pump check app.yaml --rules platform.pump.yaml --fix
 - `check` accepts one or more input files; multi-file strict mode evaluates
   every file before failing.
 
+Project config is optional. When `pump.yaml`, `.pump.yaml`, `pump.yml`,
+`.pump.yml`, `pump.json`, or `.pump.json` exists in the current directory,
+commands can default `rules`, `inputs`, `outDir`, and `format` from it:
+
+```yaml
+rules: rules.pump.yaml
+inputs:
+  - source.yaml
+outDir: rendered
+format: yaml
+```
+
+Explicit CLI arguments win over config values. Config paths resolve relative to
+the config file, so examples and CI jobs can run with short paths. Multi-input
+`inflate` requires `--out-dir` or config `outDir`; `--out` remains a single-file
+output.
+
+`diff --explain` prints a normal unified diff first, then lists the rule
+operations responsible for generated or changed values.
+
 `explain` also prints the rule operations related to the inspected path. Add
 `--all` to include the full rule trace for the document, including skipped and
 unchanged rules. Generated values include operation-level rule locations when
 available. Use `--json` when that trace needs to feed another tool.
+
+`suggest` / `discover` scans inflated or authored input and emits candidate
+`defaults` rules for repeated scalar leaf values:
+
+```sh
+pump suggest inflated/*.yaml --min-occurrences 3 --out suggested.pump.yaml
+pump discover inflated/*.yaml --json
+```
+
+Treat suggestions as a starting point for review. Pump intentionally does not
+infer templates, filters, KRM functions, or programmable logic from examples.
 
 To refresh the README terminal demo after CLI semantics settle:
 

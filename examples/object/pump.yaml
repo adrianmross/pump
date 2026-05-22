@@ -1,0 +1,5 @@
+rules: rules.pump.yaml
+inputs:
+  - source.json
+outDir: rendered
+format: json

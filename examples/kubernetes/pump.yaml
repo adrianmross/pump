@@ -1,0 +1,5 @@
+rules: rules.pump.yaml
+inputs:
+  - source.yaml
+outDir: rendered
+format: yaml
