@@ -5,13 +5,12 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand, ValueEnum};
-use serde::{Deserialize, Serialize};
-use serde_yml::{
-    Value,
-    de::{Event, Progress},
-    loader::Loader,
-};
+use saphyr::LoadableYamlNode;
+use serde::Serialize;
 use similar::TextDiff;
+
+mod value;
+use value::Value;
 
 #[derive(Parser)]
 #[command(
@@ -141,11 +140,10 @@ enum OutputFormat {
     Yaml,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug)]
 struct RuleFile {
     rules: Vec<Rule>,
 
-    #[serde(skip)]
     source_locations: RuleSourceIndex,
 }
 
@@ -166,32 +164,24 @@ impl RuleFile {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug)]
 struct Rule {
     name: String,
 
-    #[serde(rename = "match")]
     match_path: String,
 
-    #[serde(default, rename = "apiVersion")]
     api_version: Option<String>,
 
-    #[serde(default)]
     kind: Option<String>,
 
-    #[serde(default, rename = "metadata.name", alias = "metadataName")]
     metadata_name: Option<String>,
 
-    #[serde(default)]
     defaults: Option<Value>,
 
-    #[serde(default)]
     overrides: Option<Value>,
 
-    #[serde(default)]
     delete: Vec<String>,
 
-    #[serde(default)]
     replace: Option<Value>,
 }
 
@@ -458,12 +448,10 @@ fn read_input(path: &Path) -> Result<Vec<Value>> {
         OutputFormat::Json => {
             let doc = serde_json::from_str(&input)
                 .with_context(|| format!("failed to parse JSON {}", path.display()))?;
-            Ok(vec![doc])
+            Ok(vec![Value::from_json(doc)])
         }
         OutputFormat::Yaml => {
-            let docs = serde_yml::Deserializer::from_str(&input)
-                .map(Value::deserialize)
-                .collect::<std::result::Result<Vec<_>, _>>()
+            let docs = Value::parse_yaml_documents(&input)
                 .with_context(|| format!("failed to parse YAML {}", path.display()))?;
 
             if docs.is_empty() {
@@ -478,104 +466,186 @@ fn read_input(path: &Path) -> Result<Vec<Value>> {
 fn read_rules(path: &Path) -> Result<RuleFile> {
     let input = fs::read_to_string(path)
         .with_context(|| format!("failed to read rules {}", path.display()))?;
-    let mut rules: RuleFile = serde_yml::from_str(&input)
+    parse_rules_document(path, &input)
+}
+
+fn parse_rules_document(path: &Path, input: &str) -> Result<RuleFile> {
+    let documents = saphyr::MarkedYamlOwned::load_from_str(input)
         .with_context(|| format!("failed to parse rules {}", path.display()))?;
+    let Some(document) = documents.first() else {
+        bail!("{} did not contain a rule document", path.display());
+    };
+
+    let mut source_locations = HashMap::new();
+    collect_rule_source_locations(document, Vec::new(), path, &mut source_locations)?;
+
+    let root = Value::from_marked_yaml(document)
+        .with_context(|| format!("failed to read rules {}", path.display()))?;
+    let rules_value = required_child(&root, "rules")?;
+    let Some(rule_items) = rules_value.as_sequence() else {
+        bail!("{} field rules must be a sequence", path.display());
+    };
+
+    let rules = rule_items
+        .iter()
+        .enumerate()
+        .map(|(index, value)| parse_rule(index, value))
+        .collect::<Result<Vec<_>>>()?;
+
+    let rules = RuleFile {
+        rules,
+        source_locations,
+    };
 
     if rules.rules.is_empty() {
         bail!("{} did not define any rules", path.display());
     }
-
-    rules.source_locations = rule_source_locations(path, &input)
-        .with_context(|| format!("failed to index rule source locations {}", path.display()))?;
 
     validate_rules(&rules)?;
 
     Ok(rules)
 }
 
-fn rule_source_locations(path: &Path, input: &str) -> Result<RuleSourceIndex> {
-    let mut loader = Loader::new(Progress::Str(input))?;
-    let Some(document) = loader.next_document() else {
-        return Ok(HashMap::new());
+fn parse_rule(index: usize, value: &Value) -> Result<Rule> {
+    let Some(map) = value.as_mapping() else {
+        bail!("rules[{index}] must be a mapping");
     };
 
-    if let Some(error) = document.error {
-        bail!("failed to parse rule source locations: {}", error);
-    }
+    let name = required_string(map, "name", index)?;
+    let match_path = required_string(map, "match", index)?;
+    let api_version = optional_string(map, "apiVersion", index)?;
+    let kind = optional_string(map, "kind", index)?;
+    let metadata_name = optional_string(map, "metadata.name", index)?.or(optional_string(
+        map,
+        "metadataName",
+        index,
+    )?);
+    let defaults = map.get("defaults").cloned();
+    let overrides = map.get("overrides").cloned();
+    let delete = optional_string_sequence(map, "delete", index)?;
+    let replace = map.get("replace").cloned();
 
-    let mut index = HashMap::new();
-    let mut position = 0;
-    collect_rule_source_locations(
-        &document.events,
-        &mut position,
-        Vec::new(),
-        path,
-        &mut index,
-    )?;
+    Ok(Rule {
+        name,
+        match_path,
+        api_version,
+        kind,
+        metadata_name,
+        defaults,
+        overrides,
+        delete,
+        replace,
+    })
+}
 
-    Ok(index)
+fn required_child<'a>(value: &'a Value, key: &str) -> Result<&'a Value> {
+    value
+        .get(key)
+        .with_context(|| format!("missing required field {key}"))
+}
+
+fn required_string(
+    map: &indexmap::IndexMap<String, Value>,
+    key: &str,
+    index: usize,
+) -> Result<String> {
+    optional_string(map, key, index)?.with_context(|| format!("rules[{index}].{key} is required"))
+}
+
+fn optional_string(
+    map: &indexmap::IndexMap<String, Value>,
+    key: &str,
+    index: usize,
+) -> Result<Option<String>> {
+    let Some(value) = map.get(key) else {
+        return Ok(None);
+    };
+
+    value
+        .as_str()
+        .map(|value| Some(value.to_string()))
+        .with_context(|| format!("rules[{index}].{key} must be a string"))
+}
+
+fn optional_string_sequence(
+    map: &indexmap::IndexMap<String, Value>,
+    key: &str,
+    index: usize,
+) -> Result<Vec<String>> {
+    let Some(value) = map.get(key) else {
+        return Ok(Vec::new());
+    };
+    let Some(values) = value.as_sequence() else {
+        bail!("rules[{index}].{key} must be a sequence");
+    };
+
+    values
+        .iter()
+        .enumerate()
+        .map(|(item_index, value)| {
+            value
+                .as_str()
+                .map(ToString::to_string)
+                .with_context(|| format!("rules[{index}].{key}[{item_index}] must be a string"))
+        })
+        .collect()
 }
 
 fn collect_rule_source_locations(
-    events: &[(Event<'_>, serde_yml::libyml::error::Mark)],
-    position: &mut usize,
+    value: &saphyr::MarkedYamlOwned,
     path: Vec<String>,
     file: &Path,
     index: &mut RuleSourceIndex,
 ) -> Result<()> {
-    let Some((event, _mark)) = events.get(*position) else {
-        return Ok(());
-    };
-
-    match event {
-        Event::MappingStart(_) => {
-            *position += 1;
-            while let Some((event, mark)) = events.get(*position) {
-                if matches!(event, Event::MappingEnd) {
-                    *position += 1;
-                    break;
-                }
-
-                let Some(key) = scalar_event_text(event) else {
-                    bail!("expected scalar mapping key while indexing rule locations");
-                };
-                *position += 1;
-
+    match &value.data {
+        saphyr::YamlDataOwned::Mapping(values) => {
+            for (key, child) in values {
+                let key_text = marked_scalar_to_string(key)?;
                 let mut child_path = path.clone();
-                child_path.push(key.clone());
-                record_rule_source_location(&child_path, file, *mark, index);
-                collect_rule_source_locations(events, position, child_path, file, index)?;
+                child_path.push(key_text);
+                record_rule_source_location(&child_path, file, key.span, index);
+                collect_rule_source_locations(child, child_path, file, index)?;
             }
         }
-        Event::SequenceStart(_) => {
-            *position += 1;
-            let mut item_index = 0;
-            while let Some((event, mark)) = events.get(*position) {
-                if matches!(event, Event::SequenceEnd) {
-                    *position += 1;
-                    break;
-                }
-
+        saphyr::YamlDataOwned::Sequence(values) => {
+            for (item_index, child) in values.iter().enumerate() {
                 let mut child_path = path.clone();
                 child_path.push(item_index.to_string());
-                record_rule_source_location(&child_path, file, *mark, index);
-                collect_rule_source_locations(events, position, child_path, file, index)?;
-                item_index += 1;
+                record_rule_source_location(&child_path, file, child.span, index);
+                collect_rule_source_locations(child, child_path, file, index)?;
             }
         }
-        Event::Alias(_) | Event::Scalar(_) | Event::Void => {
-            *position += 1;
+        saphyr::YamlDataOwned::Tagged(_, child) => {
+            collect_rule_source_locations(child, path, file, index)?;
         }
-        Event::MappingEnd | Event::SequenceEnd => {}
+        _ => {}
     }
 
     Ok(())
 }
 
+fn marked_scalar_to_string(value: &saphyr::MarkedYamlOwned) -> Result<String> {
+    match Value::from_marked_yaml(value)? {
+        Value::String(value) => Ok(value),
+        Value::Number(value::Number::Integer(value)) => Ok(value.to_string()),
+        Value::Number(value::Number::Unsigned(value)) => Ok(value.to_string()),
+        Value::Number(value::Number::Float(value)) => Ok(value.to_string()),
+        Value::Bool(value) => Ok(value.to_string()),
+        Value::Null => Ok("null".to_string()),
+        Value::Tagged { value, .. } => match *value {
+            Value::String(value) => Ok(value),
+            _ => bail!("expected scalar mapping key while indexing rule locations"),
+        },
+        Value::Sequence(_) | Value::Mapping(_) => {
+            bail!("expected scalar mapping key while indexing rule locations")
+        }
+    }
+}
+
 fn record_rule_source_location(
     path: &[String],
     file: &Path,
-    mark: serde_yml::libyml::error::Mark,
+    span: saphyr_parser::Span,
     index: &mut RuleSourceIndex,
 ) {
     let [root, rule_index, operation, relative_path @ ..] = path else {
@@ -599,19 +669,11 @@ fn record_rule_source_location(
         value_location_key(rule_index, operation, relative_path),
         SourceLocation {
             file: file.display().to_string(),
-            line: mark.line() + 1,
-            column: mark.column() + 1,
-            byte_index: mark.index(),
+            line: span.start.line() as u64,
+            column: span.start.col() as u64 + 1,
+            byte_index: span.start.index() as u64,
         },
     );
-}
-
-fn scalar_event_text(event: &Event<'_>) -> Option<String> {
-    let Event::Scalar(scalar) = event else {
-        return None;
-    };
-
-    Some(String::from_utf8_lossy(&scalar.value).into_owned())
 }
 
 fn operation_key(rule_index: usize, operation: &str) -> String {
@@ -1059,9 +1121,7 @@ fn apply_defaults(
     };
 
     for (key_value, default_value) in default_map {
-        let Some(key) = key_value.as_str() else {
-            continue;
-        };
+        let key = key_value.as_str();
         let mut child_path = path.to_vec();
         child_path.push(key.to_string());
         let mut child_rule_value_path = rule_value_path.to_vec();
@@ -1137,9 +1197,7 @@ fn apply_overrides(
                 .expect("override mapping checked above");
 
             for (key_value, override_value) in override_map {
-                let Some(key) = key_value.as_str() else {
-                    continue;
-                };
+                let key = key_value.as_str();
                 let mut child_path = path.to_vec();
                 child_path.push(key.to_string());
                 let mut child_rule_value_path = rule_value_path.to_vec();
@@ -1273,9 +1331,7 @@ fn remove_values_matching(
     let mut remove_keys = Vec::new();
 
     for (key_value, template_value) in template_map {
-        let Some(key) = key_value.as_str() else {
-            continue;
-        };
+        let key = key_value.as_str();
         let mut child_path = path.to_vec();
         child_path.push(key.to_string());
 
@@ -1301,7 +1357,7 @@ fn remove_values_matching(
     }
 
     for key in remove_keys {
-        target_map.shift_remove(key);
+        target_map.shift_remove(&key);
     }
 }
 
@@ -1509,9 +1565,7 @@ fn record_generated_paths(
 
     if let Some(map) = value.as_mapping() {
         for (child_key, child_value) in map {
-            let Some(child_key) = child_key.as_str() else {
-                continue;
-            };
+            let child_key = child_key.as_str();
             let mut child_path = path.to_vec();
             child_path.push(child_key.to_string());
             let mut child_rule_value_path = rule_value_path.to_vec();
@@ -1742,9 +1796,7 @@ fn collect_matching_paths(
             _ if value.is_mapping() => {
                 let map = value.as_mapping().expect("mapping checked above");
                 for (key, child) in map {
-                    let Some(key) = key.as_str() else {
-                        continue;
-                    };
+                    let key = key.as_str();
                     let mut child_path = current_path.clone();
                     child_path.push(key.to_string());
                     collect_matching_paths(child, tail, child_path, output);
@@ -2020,12 +2072,19 @@ fn format_docs(docs: &[Value], format: OutputFormat) -> Result<String> {
             let mut output = String::new();
 
             for (index, doc) in docs.iter().enumerate() {
-                if docs.len() > 1 || index > 0 {
+                if index > 0 && !output.ends_with('\n') {
+                    output.push('\n');
+                }
+
+                if docs.len() > 1 {
                     output.push_str("---\n");
                 }
 
-                let rendered = serde_yml::to_string(doc)?;
+                let rendered = doc.to_yaml_string()?;
                 output.push_str(rendered.strip_prefix("---\n").unwrap_or(&rendered));
+                if !output.ends_with('\n') {
+                    output.push('\n');
+                }
             }
 
             Ok(output)
@@ -2044,7 +2103,8 @@ fn format_inline(value: &Value) -> String {
 }
 
 fn format_yaml_inline(value: &Value) -> String {
-    serde_yml::to_string(value)
+    value
+        .to_yaml_string()
         .map(|rendered| rendered.trim().trim_start_matches("---").trim().to_string())
         .unwrap_or_default()
 }
@@ -2082,12 +2142,23 @@ mod tests {
 
     macro_rules! json {
         ($($json:tt)+) => {
-            serde_yml::to_value(serde_json::json!($($json)+)).unwrap()
+            Value::from_json(serde_json::json!($($json)+))
         };
     }
 
+    fn rule_file(source: &str) -> Result<RuleFile> {
+        parse_rules_document(Path::new("rules.pump.yaml"), source)
+    }
+
+    fn yaml_value(source: &str) -> Result<Value> {
+        Value::parse_yaml_documents(source)?
+            .into_iter()
+            .next()
+            .context("expected a YAML document")
+    }
+
     fn rules() -> RuleFile {
-        serde_yml::from_str(
+        rule_file(
             r#"
 rules:
   - name: default-item-shape
@@ -2164,7 +2235,7 @@ rules:
 
     #[test]
     fn wildcard_matches_array_items() {
-        let rule_file: RuleFile = serde_yml::from_str(
+        let rule_file = rule_file(
             r#"
 rules:
   - name: container-defaults
@@ -2205,7 +2276,7 @@ rules:
 
     #[test]
     fn selectors_limit_rules_to_matching_kubernetes_documents() {
-        let rule_file: RuleFile = serde_yml::from_str(
+        let rule_file = rule_file(
             r#"
 rules:
   - name: deployment-defaults
@@ -2242,7 +2313,7 @@ rules:
 
     #[test]
     fn inflate_with_traces_records_applied_and_skipped_rules() {
-        let rule_file: RuleFile = serde_yml::from_str(
+        let rule_file = rule_file(
             r#"
 rules:
   - name: deployment-defaults
@@ -2306,7 +2377,8 @@ rules:
       enabled: false
 "#;
 
-        let index = rule_source_locations(Path::new("rules.pump.yaml"), source).unwrap();
+        let rule_file = parse_rules_document(Path::new("rules.pump.yaml"), source).unwrap();
+        let index = &rule_file.source_locations;
 
         assert_eq!(
             index.get(&operation_key(0, "default")).unwrap(),
@@ -2397,7 +2469,7 @@ rules:
 
     #[test]
     fn value_locations_fall_back_cleanly_without_source_index() {
-        let rule_file: RuleFile = serde_yml::from_str(
+        let mut rule_file = rule_file(
             r#"
 rules:
   - name: default-item-shape
@@ -2407,6 +2479,7 @@ rules:
 "#,
         )
         .unwrap();
+        rule_file.source_locations.clear();
         let mut docs = vec![json!({"first": {}})];
         let mut provenance = HashMap::new();
         let mut traces = Vec::new();
@@ -2425,7 +2498,7 @@ rules:
 
     #[test]
     fn overrides_delete_and_replace_apply_in_rule_order() {
-        let rule_file: RuleFile = serde_yml::from_str(
+        let rule_file = rule_file(
             r#"
 rules:
   - name: base
@@ -2512,7 +2585,7 @@ rules:
                 "mode": "safe"
             }
         })];
-        let rule_file: RuleFile = serde_yml::from_str(
+        let rule_file = rule_file(
             r#"
 rules:
   - name: defaults
@@ -2539,7 +2612,7 @@ rules:
                 "bottom": "z"
             }
         })];
-        let rule_file: RuleFile = serde_yml::from_str(
+        let rule_file = rule_file(
             r#"
 rules:
   - name: default-item-shape
@@ -2632,8 +2705,22 @@ fields:
     }
 
     #[test]
+    fn yaml_multi_document_output_keeps_document_boundaries() {
+        let docs = vec![
+            json!({"kind": "Deployment", "spec": {"replicas": 2}}),
+            json!({"kind": "Service", "spec": {"type": "ClusterIP"}}),
+        ];
+
+        let rendered = format_docs(&docs, OutputFormat::Yaml).unwrap();
+
+        assert!(rendered.starts_with("---\nkind: Deployment"));
+        assert!(rendered.contains("replicas: 2\n---\nkind: Service"));
+        assert!(rendered.ends_with('\n'));
+    }
+
+    #[test]
     fn inflate_preserves_yaml_custom_tags() {
-        let rule_file: RuleFile = serde_yml::from_str(
+        let rule_file = rule_file(
             r#"
 rules:
   - name: blueprint-defaults
@@ -2644,7 +2731,7 @@ rules:
         )
         .unwrap();
         let mut docs = vec![
-            serde_yml::from_str(
+            yaml_value(
                 r#"
 flow_authentication: !Find [authentik_flows.flow, [slug, default-authentication-flow]]
 "#,
@@ -2662,7 +2749,7 @@ flow_authentication: !Find [authentik_flows.flow, [slug, default-authentication-
 
     #[test]
     fn deflate_preserves_yaml_custom_tags() {
-        let rule_file: RuleFile = serde_yml::from_str(
+        let rule_file = rule_file(
             r#"
 rules:
   - name: blueprint-defaults
@@ -2673,7 +2760,7 @@ rules:
         )
         .unwrap();
         let mut docs = vec![
-            serde_yml::from_str(
+            yaml_value(
                 r#"
 enabled: true
 flow_authentication: !Find [authentik_flows.flow, [slug, default-authentication-flow]]
@@ -2733,9 +2820,10 @@ flow_authentication: !Find [authentik_flows.flow, [slug, default-authentication-
 
         check_inputs(&inputs, &rules(), false, true, Some(OutputFormat::Json)).unwrap();
 
-        let first_doc: Value = serde_json::from_str(&fs::read_to_string(&first).unwrap()).unwrap();
-        let second_doc: Value =
-            serde_json::from_str(&fs::read_to_string(&second).unwrap()).unwrap();
+        let first_doc =
+            Value::from_json(serde_json::from_str(&fs::read_to_string(&first).unwrap()).unwrap());
+        let second_doc =
+            Value::from_json(serde_json::from_str(&fs::read_to_string(&second).unwrap()).unwrap());
 
         assert_eq!(first_doc["first"]["bottom"], json!("z"));
         assert_eq!(second_doc["second"]["bottom"], json!("z"));

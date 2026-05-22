@@ -37,10 +37,10 @@ pump explain app.yaml --rules platform.pump.yaml \
 
 ## Source Locations
 
-Pump keeps `serde_yml` as the YAML parser and adds a second source-index pass
-over `serde_yml::loader::Loader`. Its parsed document events carry marks with
-byte index, line, and column. That avoids adding a second YAML parser only for
-spans.
+Pump uses the Saphyr YAML parser for both value loading and source indexing.
+Its marked YAML nodes carry byte index, line, and column information, so the
+same parser path owns custom tags, normalized YAML output, and provenance
+locations.
 
 Pump records operation-level locations:
 
