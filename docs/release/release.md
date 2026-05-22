@@ -8,7 +8,7 @@ publishing a Homebrew tap update.
 
 ## Current Contract
 
-- The first public release is `v0.1.0`.
+- The first public release was `v0.1.0`.
 - Until Pump is declared stable, use pre-1.0 semver:
   - patch bumps for fixes and small compatible improvements,
   - minor bumps for new user-facing capabilities or intentional CLI/rule
